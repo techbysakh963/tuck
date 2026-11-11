@@ -1,5 +1,6 @@
 //! Tuck: clipboard history for GNOME.
 
+pub mod app;
 pub mod blobs;
 pub mod capture;
 pub mod echo;
