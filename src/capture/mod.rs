@@ -2,6 +2,15 @@
 
 use std::path::PathBuf;
 
+mod data_control;
+mod x11;
+
+/// Largest single clipboard payload a watcher will read (bytes).
+pub(crate) const MAX_PAYLOAD: usize = 128 * 1024 * 1024;
+
+/// Hint some password managers attach to their copies.
+const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";
+
 /// The clipboard payload a watcher decided to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Captured {
@@ -20,4 +29,333 @@ pub struct CaptureEvent {
     pub secret_hint: Option<String>,
     /// Best-effort name of the application that owns the selection.
     pub source: Option<String>,
+}
+
+/// How clipboard events are obtained in this session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    ExtDataControl,
+    WlrDataControl,
+    X11,
+}
+
+/// What the session offers, gathered without side effects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionEnv {
+    pub wayland_display: bool,
+    pub x_display: bool,
+    /// Interface names advertised by the Wayland registry.
+    pub globals: Vec<String>,
+}
+
+/// Picks the best backend: native data-control first, then X11 (which also
+/// covers GNOME, where the compositor mirrors its clipboard into XWayland).
+pub fn select_backend(env: &SessionEnv) -> Option<BackendKind> {
+    if env.wayland_display {
+        let has = |name: &str| env.globals.iter().any(|g| g == name);
+        if has("ext_data_control_manager_v1") {
+            return Some(BackendKind::ExtDataControl);
+        }
+        if has("zwlr_data_control_manager_v1") {
+            return Some(BackendKind::WlrDataControl);
+        }
+    }
+    env.x_display.then_some(BackendKind::X11)
+}
+
+/// Inspects the environment and, under Wayland, lists the registry globals.
+pub fn probe_session() -> SessionEnv {
+    let nonempty = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    let mut env = SessionEnv {
+        wayland_display: nonempty("WAYLAND_DISPLAY"),
+        x_display: nonempty("DISPLAY"),
+        globals: Vec::new(),
+    };
+    if env.wayland_display {
+        match data_control::list_globals() {
+            Ok(globals) => env.globals = globals,
+            Err(e) => {
+                log::warn!("could not list Wayland globals: {e}");
+                env.wayland_display = false;
+            }
+        }
+    }
+    env
+}
+
+/// Starts the backend on its own thread. The thread blocks on the display
+/// connection and ends when the connection drops or the receiver is gone.
+pub fn spawn(
+    kind: BackendKind,
+    tx: async_channel::Sender<CaptureEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("tuck-capture".into())
+        .spawn(move || {
+            let result = match kind {
+                BackendKind::X11 => x11::run(&tx),
+                BackendKind::ExtDataControl => data_control::run_ext(&tx),
+                BackendKind::WlrDataControl => data_control::run_wlr(&tx),
+            };
+            if let Err(e) = result {
+                log::error!("clipboard watcher stopped: {e}");
+            }
+        })
+        .expect("spawn capture thread")
+}
+
+/// The representation worth reading from an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preferred {
+    Png,
+    Html,
+    Utf8Text,
+    UriList,
+}
+
+const TEXT_MIMES: [&str; 4] = [
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "STRING",
+];
+
+/// The offered text flavour to read, best first.
+pub(crate) fn text_mime(offered: &[String]) -> Option<&'static str> {
+    TEXT_MIMES
+        .into_iter()
+        .find(|m| offered.iter().any(|o| o == m))
+}
+
+/// Decides which flavour to read: an image beats everything, then a file
+/// copy, then rich text (with its plain companion), then plain text.
+pub fn choose_target(offered: &[String]) -> Option<Preferred> {
+    let has = |m: &str| offered.iter().any(|o| o == m);
+    let has_text = text_mime(offered).is_some();
+    if has("image/png") {
+        return Some(Preferred::Png);
+    }
+    // File managers also offer the path as text; the marker tells a file copy
+    // apart from an application that merely offers a link next to its text.
+    let file_copy = has("x-special/gnome-copied-files");
+    if has("text/uri-list") && (!has_text || file_copy) {
+        return Some(Preferred::UriList);
+    }
+    if has("text/html") && has_text {
+        return Some(Preferred::Html);
+    }
+    has_text.then_some(Preferred::Utf8Text)
+}
+
+/// Reads the chosen flavour through `read` (mime type -> bytes) and builds the
+/// event body. Returns `None` when nothing usable could be read.
+pub(crate) fn read_capture(
+    offered: &[String],
+    source: Option<String>,
+    mut read: impl FnMut(&str) -> Option<Vec<u8>>,
+) -> Option<CaptureEvent> {
+    let preferred = choose_target(offered)?;
+    let captured = match preferred {
+        Preferred::Png => Captured::Image {
+            png: read("image/png")?,
+        },
+        Preferred::UriList => {
+            let raw = read("text/uri-list")?;
+            let files = parse_uri_list(&String::from_utf8_lossy(&raw));
+            if files.is_empty() {
+                return None;
+            }
+            Captured::Files(files)
+        }
+        Preferred::Html | Preferred::Utf8Text => {
+            let text = String::from_utf8_lossy(&read(text_mime(offered)?)?).into_owned();
+            let html = if preferred == Preferred::Html {
+                read("text/html").map(|b| String::from_utf8_lossy(&b).into_owned())
+            } else {
+                None
+            };
+            Captured::Text { text, html }
+        }
+    };
+    let secret_hint = offered
+        .iter()
+        .any(|o| o == SECRET_HINT_MIME)
+        .then(|| read(SECRET_HINT_MIME))
+        .flatten()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    Some(CaptureEvent {
+        captured,
+        mime_types: offered.to_vec(),
+        secret_hint,
+        source,
+    })
+}
+
+/// Parses a `text/uri-list` body into local paths; other schemes and
+/// comments are skipped.
+pub(crate) fn parse_uri_list(raw: &str) -> Vec<PathBuf> {
+    raw.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("file://")?;
+            // Drop an optional host ("file://localhost/x").
+            let path = &rest[rest.find('/')?..];
+            Some(PathBuf::from(percent_decode(path)))
+        })
+        .collect()
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
+            if let Some(v) = hex {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn env(wayland: bool, x: bool, globals: &[&str]) -> SessionEnv {
+        SessionEnv {
+            wayland_display: wayland,
+            x_display: x,
+            globals: v(globals),
+        }
+    }
+
+    #[test]
+    fn select_backend_table() {
+        let gnome = env(true, true, &["wl_compositor", "wl_seat"]);
+        assert_eq!(select_backend(&gnome), Some(BackendKind::X11));
+        let kde = env(true, true, &["wl_seat", "ext_data_control_manager_v1"]);
+        assert_eq!(select_backend(&kde), Some(BackendKind::ExtDataControl));
+        let sway = env(true, false, &["zwlr_data_control_manager_v1"]);
+        assert_eq!(select_backend(&sway), Some(BackendKind::WlrDataControl));
+        let both = env(
+            true,
+            true,
+            &[
+                "zwlr_data_control_manager_v1",
+                "ext_data_control_manager_v1",
+            ],
+        );
+        assert_eq!(select_backend(&both), Some(BackendKind::ExtDataControl));
+        assert_eq!(
+            select_backend(&env(false, true, &[])),
+            Some(BackendKind::X11)
+        );
+        assert_eq!(select_backend(&env(true, false, &["wl_seat"])), None);
+        assert_eq!(select_backend(&env(false, false, &[])), None);
+    }
+
+    #[test]
+    fn choose_target_cases() {
+        // Firefox: text and html.
+        let firefox = v(&["text/html", "text/plain;charset=utf-8", "text/plain"]);
+        assert_eq!(choose_target(&firefox), Some(Preferred::Html));
+        // Screenshot.
+        assert_eq!(
+            choose_target(&v(&["image/png", "image/bmp"])),
+            Some(Preferred::Png)
+        );
+        // File manager copy, with a text fallback.
+        let nautilus = v(&[
+            "x-special/gnome-copied-files",
+            "text/uri-list",
+            "text/plain;charset=utf-8",
+        ]);
+        assert_eq!(choose_target(&nautilus), Some(Preferred::UriList));
+        // Uri list alone.
+        assert_eq!(
+            choose_target(&v(&["text/uri-list"])),
+            Some(Preferred::UriList)
+        );
+        // A link next to text stays text.
+        assert_eq!(
+            choose_target(&v(&["text/uri-list", "UTF8_STRING"])),
+            Some(Preferred::Utf8Text)
+        );
+        // Password manager: plain text, hint read separately.
+        let keepass = v(&["text/plain", "x-kde-passwordManagerHint"]);
+        assert_eq!(choose_target(&keepass), Some(Preferred::Utf8Text));
+        // Html without any text is not usable; nothing offered neither.
+        assert_eq!(choose_target(&v(&["text/html"])), None);
+        assert_eq!(choose_target(&[]), None);
+        assert_eq!(choose_target(&v(&["TARGETS", "TIMESTAMP"])), None);
+    }
+
+    #[test]
+    fn read_capture_reads_hint_separately() {
+        let offered = v(&["text/plain", "x-kde-passwordManagerHint"]);
+        let event = read_capture(&offered, None, |m| match m {
+            "text/plain" => Some(b"hunter2".to_vec()),
+            "x-kde-passwordManagerHint" => Some(b"secret".to_vec()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            event.captured,
+            Captured::Text {
+                text: "hunter2".into(),
+                html: None
+            }
+        );
+        assert_eq!(event.secret_hint.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn read_capture_html_keeps_both_flavours() {
+        let offered = v(&["text/html", "UTF8_STRING"]);
+        let event = read_capture(&offered, Some("firefox".into()), |m| match m {
+            "UTF8_STRING" => Some(b"hi".to_vec()),
+            "text/html" => Some(b"<b>hi</b>".to_vec()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            event.captured,
+            Captured::Text {
+                text: "hi".into(),
+                html: Some("<b>hi</b>".into())
+            }
+        );
+        assert_eq!(event.source.as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn read_capture_gives_up_when_read_fails() {
+        assert!(read_capture(&v(&["image/png"]), None, |_| None).is_none());
+    }
+
+    #[test]
+    fn uri_list_is_decoded() {
+        let raw =
+            "# comment\r\nfile:///home/a/My%20File.txt\r\nhttp://x/y\r\nfile://localhost/tmp/b\r\n";
+        assert_eq!(
+            parse_uri_list(raw),
+            vec![
+                PathBuf::from("/home/a/My File.txt"),
+                PathBuf::from("/tmp/b")
+            ]
+        );
+    }
 }
