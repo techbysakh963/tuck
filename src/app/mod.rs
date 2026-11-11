@@ -2,6 +2,7 @@
 
 pub mod clipboard_page;
 pub mod paste_flow;
+pub mod row;
 pub mod window;
 
 use std::cell::{Cell, RefCell};
