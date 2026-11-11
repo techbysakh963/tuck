@@ -1,8 +1,12 @@
 //! Tuck: clipboard history for GNOME.
 
 pub mod blobs;
+pub mod capture;
+pub mod echo;
 pub mod history;
+pub mod ingest;
 pub mod kind;
+pub mod logging;
 pub mod model;
 pub mod privacy;
 pub mod settings;
