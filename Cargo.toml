@@ -1,0 +1,33 @@
+[package]
+name = "tuck"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Clipboard history, emoji and symbol picker for GNOME"
+
+[lib]
+name = "tuck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tuck"
+path = "src/main.rs"
+
+[dependencies]
+async-channel = "2.5.0"
+gtk4 = { version = "0.11", features = ["v4_14"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+libadwaita = { version = "0.9", features = ["v1_5"] }
+log = "0.4.35"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+opt-level = 3
