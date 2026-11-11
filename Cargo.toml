@@ -30,6 +30,7 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 x11rb = { version = "0.14", features = ["xfixes", "xtest"] }
 zbus = "6"
+zruntime = { version = "0.2", features = ["helper"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -42,14 +43,4 @@ opt-level = 3
 
 # Decoding and encoding large screenshots in unoptimised test builds is very slow.
 [profile.dev.package.image]
-opt-level = 3
-[profile.dev.package.png]
-opt-level = 3
-[profile.dev.package.fdeflate]
-opt-level = 3
-[profile.dev.package.flate2]
-opt-level = 3
-[profile.dev.package.miniz_oxide]
-opt-level = 3
-[profile.dev.package.crc32fast]
 opt-level = 3
