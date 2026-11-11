@@ -1,0 +1,577 @@
+//! The clipboard history index: ordering, de-duplication, pinning, caps and persistence.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io::{self, Cursor, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use image::imageops::FilterType;
+use image::ImageFormat;
+use serde::{Deserialize, Serialize};
+
+use crate::blobs::{blob_name, BlobStore};
+use crate::model::{ClipContent, ClipItem, ItemId, TextBody};
+
+pub const INLINE_TEXT_MAX: usize = 64 * 1024;
+pub const PREVIEW_CHARS: usize = 200;
+pub const THUMB_MAX_H: u32 = 128;
+
+const INDEX_FILE: &str = "history.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddOutcome {
+    Added(ItemId),
+    Moved(ItemId),
+}
+
+impl AddOutcome {
+    pub fn id(self) -> ItemId {
+        match self {
+            AddOutcome::Added(id) | AddOutcome::Moved(id) => id,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LoadReport {
+    /// Set when the index could not be read and was set aside under this name.
+    pub recovered_from_corrupt: Option<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct IndexFile {
+    next_id: ItemId,
+    items: Vec<ClipItem>,
+}
+
+pub struct HistoryStore {
+    dir: PathBuf,
+    blobs: BlobStore,
+    items: Vec<ClipItem>,
+    next_id: ItemId,
+    max_items: usize,
+    dirty: bool,
+    #[cfg(test)]
+    save_count: usize,
+}
+
+fn preview_of(text: &str) -> String {
+    text.chars().take(PREVIEW_CHARS).collect()
+}
+
+fn invalid(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+impl HistoryStore {
+    /// Opens the store in `dir`. An unreadable index is moved aside, never overwritten.
+    pub fn open(dir: &Path, max_items: usize) -> (Self, LoadReport) {
+        if let Err(e) = fs::create_dir_all(dir) {
+            log::error!("cannot create data directory {}: {e}", dir.display());
+        }
+        let blob_dir = dir.join("blobs");
+        let blobs = BlobStore::open(&blob_dir).unwrap_or_else(|e| {
+            log::error!("cannot create blob directory {}: {e}", blob_dir.display());
+            BlobStore::at(&blob_dir)
+        });
+        let mut report = LoadReport::default();
+        let index_path = dir.join(INDEX_FILE);
+        let index = match fs::read(&index_path) {
+            Ok(bytes) => match serde_json::from_slice::<IndexFile>(&bytes) {
+                Ok(index) => index,
+                Err(e) => {
+                    log::error!("history index is corrupt: {e}");
+                    report.recovered_from_corrupt = set_aside(&index_path);
+                    IndexFile::default()
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => IndexFile::default(),
+            Err(e) => {
+                log::error!("cannot read history index: {e}");
+                report.recovered_from_corrupt = set_aside(&index_path);
+                IndexFile::default()
+            }
+        };
+        let next_id = index
+            .items
+            .iter()
+            .map(|i| i.id + 1)
+            .max()
+            .unwrap_or(1)
+            .max(index.next_id)
+            .max(1);
+        let mut store = Self {
+            dir: dir.to_path_buf(),
+            blobs,
+            items: index.items,
+            next_id,
+            max_items: max_items.max(1),
+            dirty: false,
+            #[cfg(test)]
+            save_count: 0,
+        };
+        store.sort();
+        store.enforce_cap();
+        store.dirty = false;
+        (store, report)
+    }
+
+    pub fn add_text(
+        &mut self,
+        text: String,
+        html: Option<String>,
+        source: Option<String>,
+        now_ms: i64,
+    ) -> io::Result<AddOutcome> {
+        let body = if text.len() > INLINE_TEXT_MAX {
+            let name = self.blobs.put(text.as_bytes(), "txt")?;
+            TextBody::Blob {
+                name,
+                preview: preview_of(&text),
+                len: text.len(),
+            }
+        } else {
+            TextBody::Inline(text)
+        };
+        let existing = self.items.iter().position(|i| match &i.content {
+            ClipContent::Text { text, .. } => text == &body,
+            ClipContent::Image { .. } => false,
+        });
+        if let Some(pos) = existing {
+            let item = &mut self.items[pos];
+            item.used_ms = now_ms;
+            if let (ClipContent::Text { html: slot, .. }, Some(h)) = (&mut item.content, html) {
+                *slot = Some(h);
+            }
+            let id = item.id;
+            self.changed();
+            return Ok(AddOutcome::Moved(id));
+        }
+        let id = self.new_id();
+        self.items.push(ClipItem {
+            id,
+            content: ClipContent::Text { text: body, html },
+            created_ms: now_ms,
+            used_ms: now_ms,
+            pinned: false,
+            source,
+        });
+        self.changed();
+        Ok(AddOutcome::Added(id))
+    }
+
+    pub fn add_image(
+        &mut self,
+        png: &[u8],
+        source: Option<String>,
+        now_ms: i64,
+    ) -> io::Result<AddOutcome> {
+        let name = blob_name(png, "png");
+        let existing = self.items.iter().position(|i| match &i.content {
+            ClipContent::Image { blob, .. } => blob == &name,
+            ClipContent::Text { .. } => false,
+        });
+        if let Some(pos) = existing {
+            let id = self.items[pos].id;
+            self.items[pos].used_ms = now_ms;
+            self.changed();
+            return Ok(AddOutcome::Moved(id));
+        }
+        let img = image::load_from_memory_with_format(png, ImageFormat::Png)
+            .map_err(|e| invalid(format!("not a readable PNG: {e}")))?;
+        let (width, height) = (img.width(), img.height());
+        let thumb_png = if height > THUMB_MAX_H {
+            let w = ((u64::from(width) * u64::from(THUMB_MAX_H)) / u64::from(height)).max(1);
+            let thumb = img.resize_exact(w as u32, THUMB_MAX_H, FilterType::Triangle);
+            encode_png(&thumb)?
+        } else {
+            png.to_vec()
+        };
+        drop(img);
+        let blob = self.blobs.put(png, "png")?;
+        let id = self.new_id();
+        self.items.push(ClipItem {
+            id,
+            content: ClipContent::Image {
+                blob,
+                width,
+                height,
+                thumb_png,
+            },
+            created_ms: now_ms,
+            used_ms: now_ms,
+            pinned: false,
+            source,
+        });
+        self.changed();
+        Ok(AddOutcome::Added(id))
+    }
+
+    /// Pinned items first, then most recently used first.
+    pub fn items(&self) -> &[ClipItem] {
+        &self.items
+    }
+
+    pub fn get(&self, id: ItemId) -> Option<&ClipItem> {
+        self.items.iter().find(|i| i.id == id)
+    }
+
+    /// The complete text of an item, reading its blob when the text is large.
+    pub fn full_text(&self, id: ItemId) -> io::Result<String> {
+        match self.get(id).map(|i| &i.content) {
+            Some(ClipContent::Text {
+                text: TextBody::Inline(s),
+                ..
+            }) => Ok(s.clone()),
+            Some(ClipContent::Text {
+                text: TextBody::Blob { name, .. },
+                ..
+            }) => Ok(String::from_utf8_lossy(&self.blobs.get(name)?).into_owned()),
+            Some(ClipContent::Image { .. }) => Err(invalid("item is an image")),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "no such item")),
+        }
+    }
+
+    /// Bytes of the full-size PNG of an image item.
+    pub fn image_png(&self, id: ItemId) -> io::Result<Vec<u8>> {
+        match self.get(id).map(|i| &i.content) {
+            Some(ClipContent::Image { blob, .. }) => self.blobs.get(blob),
+            Some(_) => Err(invalid("item is not an image")),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "no such item")),
+        }
+    }
+
+    pub fn touch(&mut self, id: ItemId, now_ms: i64) {
+        if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+            item.used_ms = now_ms;
+            self.changed();
+        }
+    }
+
+    pub fn set_pinned(&mut self, id: ItemId, pinned: bool) {
+        if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+            if item.pinned != pinned {
+                item.pinned = pinned;
+                self.changed();
+            }
+        }
+    }
+
+    pub fn remove(&mut self, id: ItemId) {
+        let before = self.items.len();
+        self.items.retain(|i| i.id != id);
+        if self.items.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    pub fn clear_unpinned(&mut self) {
+        let before = self.items.len();
+        self.items.retain(|i| i.pinned);
+        if self.items.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_max_items(&mut self, n: usize) {
+        self.max_items = n.max(1);
+        self.enforce_cap();
+    }
+
+    /// Drops unpinned items last used more than `max_age_ms` ago.
+    pub fn prune_older_than(&mut self, max_age_ms: i64, now_ms: i64) -> usize {
+        let cutoff = now_ms - max_age_ms;
+        let before = self.items.len();
+        self.items.retain(|i| i.pinned || i.used_ms >= cutoff);
+        let removed = before - self.items.len();
+        if removed > 0 {
+            self.dirty = true;
+        }
+        removed
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Writes the index atomically and deletes blobs no item refers to any more.
+    pub fn save(&mut self) -> io::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let index = IndexFile {
+            next_id: self.next_id,
+            items: self.items.clone(),
+        };
+        let json = serde_json::to_vec(&index).map_err(|e| invalid(e.to_string()))?;
+        let tmp = self.dir.join(format!("{INDEX_FILE}.tmp"));
+        {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&json)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, self.dir.join(INDEX_FILE))?;
+        self.dirty = false;
+        #[cfg(test)]
+        {
+            self.save_count += 1;
+        }
+        let keep: HashSet<String> = self
+            .items
+            .iter()
+            .filter_map(|i| match &i.content {
+                ClipContent::Text {
+                    text: TextBody::Blob { name, .. },
+                    ..
+                } => Some(name.clone()),
+                ClipContent::Image { blob, .. } => Some(blob.clone()),
+                _ => None,
+            })
+            .collect();
+        self.blobs.prune(&keep);
+        Ok(())
+    }
+
+    fn new_id(&mut self) -> ItemId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn changed(&mut self) {
+        self.sort();
+        self.enforce_cap();
+        self.dirty = true;
+    }
+
+    /// Ids grow with insertion, so they break ties between items added in the same millisecond.
+    fn sort(&mut self) {
+        self.items
+            .sort_by_key(|i| std::cmp::Reverse((i.pinned, i.used_ms, i.id)));
+    }
+
+    /// Evicts the oldest unpinned items; pinned items never count against eviction.
+    fn enforce_cap(&mut self) {
+        while self.items.len() > self.max_items {
+            match self.items.iter().rposition(|i| !i.pinned) {
+                Some(pos) => {
+                    self.items.remove(pos);
+                    self.dirty = true;
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+fn encode_png(img: &image::DynamicImage) -> io::Result<Vec<u8>> {
+    let mut out = Cursor::new(Vec::new());
+    img.write_to(&mut out, ImageFormat::Png)
+        .map_err(|e| invalid(format!("cannot encode thumbnail: {e}")))?;
+    Ok(out.into_inner())
+}
+
+/// Renames an unreadable index to `history.corrupt-<unix>.json` so it is never lost.
+fn set_aside(path: &Path) -> Option<PathBuf> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!("history.corrupt-{secs}.json"));
+    match fs::rename(path, &backup) {
+        Ok(()) => Some(backup),
+        Err(e) => {
+            log::error!("cannot back up corrupt history: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ClipContent, TextBody};
+    use std::fs;
+
+    fn texts(store: &HistoryStore) -> Vec<String> {
+        store
+            .items()
+            .iter()
+            .map(|i| match &i.content {
+                ClipContent::Text { text, .. } => text.preview().to_string(),
+                ClipContent::Image { .. } => "<image>".into(),
+            })
+            .collect()
+    }
+
+    fn add(store: &mut HistoryStore, s: &str, now: i64) -> AddOutcome {
+        store.add_text(s.to_string(), None, None, now).unwrap()
+    }
+
+    fn big_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x / 16) as u8, (y / 16) as u8, ((x ^ y) / 32) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn add_then_reload_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        add(&mut s, "first", 1);
+        add(&mut s, "second", 2);
+        s.save().unwrap();
+        let (s2, report) = HistoryStore::open(tmp.path(), 50);
+        assert!(report.recovered_from_corrupt.is_none());
+        assert_eq!(texts(&s2), ["second", "first"]);
+    }
+
+    #[test]
+    fn duplicate_text_moves_to_top() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        add(&mut s, "a", 1);
+        add(&mut s, "b", 2);
+        let out = add(&mut s, "a", 3);
+        assert!(matches!(out, AddOutcome::Moved(_)));
+        assert_eq!(texts(&s), ["a", "b"]);
+    }
+
+    #[test]
+    fn pinned_items_stay_first_and_survive_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let a = add(&mut s, "a", 1).id();
+        add(&mut s, "b", 2);
+        s.set_pinned(a, true);
+        add(&mut s, "c", 3);
+        assert_eq!(texts(&s), ["a", "c", "b"]);
+        s.clear_unpinned();
+        assert_eq!(texts(&s), ["a"]);
+    }
+
+    #[test]
+    fn cap_evicts_oldest_unpinned_and_its_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 3);
+        let big = "x".repeat(INLINE_TEXT_MAX + 10);
+        add(&mut s, &big, 1);
+        add(&mut s, "b", 2);
+        add(&mut s, "c", 3);
+        s.save().unwrap();
+        let blob_dir = tmp.path().join("blobs");
+        assert_eq!(fs::read_dir(&blob_dir).unwrap().count(), 1);
+        add(&mut s, "d", 4);
+        assert_eq!(texts(&s), ["d", "c", "b"]);
+        s.save().unwrap();
+        assert_eq!(fs::read_dir(&blob_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn large_text_is_stored_as_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let big = "é".repeat(100 * 1024 / 2);
+        let id = add(&mut s, &big, 1).id();
+        s.save().unwrap();
+        match &s.get(id).unwrap().content {
+            ClipContent::Text {
+                text: TextBody::Blob { preview, .. },
+                ..
+            } => assert_eq!(preview.chars().count(), PREVIEW_CHARS),
+            other => panic!("expected blob text, got {other:?}"),
+        }
+        assert_eq!(s.full_text(id).unwrap(), big);
+        let size = fs::metadata(tmp.path().join("history.json")).unwrap().len();
+        assert!(size < 4 * 1024, "history.json is {size} bytes");
+    }
+
+    #[test]
+    fn large_text_dedupes_by_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let big = "y".repeat(INLINE_TEXT_MAX + 1);
+        add(&mut s, &big, 1);
+        add(&mut s, "small", 2);
+        assert!(matches!(add(&mut s, &big, 3), AddOutcome::Moved(_)));
+        assert_eq!(s.items().len(), 2);
+    }
+
+    #[test]
+    fn image_keeps_only_thumbnail_in_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let png = big_png(4000, 3000);
+        let id = s.add_image(&png, None, 1).unwrap().id();
+        s.save().unwrap();
+        match &s.get(id).unwrap().content {
+            ClipContent::Image {
+                blob,
+                width,
+                height,
+                thumb_png,
+            } => {
+                assert_eq!((*width, *height), (4000, 3000));
+                let thumb = image::load_from_memory(thumb_png).unwrap();
+                assert!(thumb.height() <= THUMB_MAX_H);
+                let stored = fs::read(tmp.path().join("blobs").join(blob)).unwrap();
+                assert_eq!(stored, png);
+            }
+            other => panic!("expected image, got {other:?}"),
+        }
+        let size = fs::metadata(tmp.path().join("history.json")).unwrap().len();
+        assert!(size < 64 * 1024, "history.json is {size} bytes");
+        let (s2, _) = HistoryStore::open(tmp.path(), 50);
+        assert_eq!(s2.items().len(), 1);
+    }
+
+    #[test]
+    fn burst_of_adds_respects_cap_and_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        for i in 1..=100 {
+            // Same millisecond for all: order must still follow insertion.
+            add(&mut s, &i.to_string(), 1000);
+        }
+        assert_eq!(s.items().len(), 50);
+        assert_eq!(texts(&s)[0], "100");
+        assert_eq!(texts(&s)[49], "51");
+        assert!(s.is_dirty());
+        s.save().unwrap();
+        assert!(!s.is_dirty());
+        assert_eq!(s.save_count, 1);
+        s.save().unwrap();
+        assert_eq!(s.save_count, 1);
+    }
+
+    #[test]
+    fn corrupt_history_is_backed_up_and_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("history.json"), b"{not json").unwrap();
+        let (s, report) = HistoryStore::open(tmp.path(), 50);
+        assert!(s.items().is_empty());
+        let backup = report.recovered_from_corrupt.expect("backup path");
+        assert_eq!(fs::read(&backup).unwrap(), b"{not json");
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("history.corrupt-"));
+    }
+
+    #[test]
+    fn prune_older_than_keeps_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let old = add(&mut s, "old pinned", 1).id();
+        add(&mut s, "old", 2);
+        add(&mut s, "new", 1000);
+        s.set_pinned(old, true);
+        assert_eq!(s.prune_older_than(500, 1000), 1);
+        assert_eq!(texts(&s), ["old pinned", "new"]);
+    }
+}

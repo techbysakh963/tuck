@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-channel = "2.5.0"
+base64 = "0.23.1"
 gtk4 = { version = "0.11", features = ["v4_14"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 libadwaita = { version = "0.9", features = ["v1_5"] }
@@ -30,4 +31,18 @@ tempfile = "3.27.0"
 lto = "thin"
 strip = true
 codegen-units = 1
+opt-level = 3
+
+# Decoding and encoding large screenshots in unoptimised test builds is very slow.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
 opt-level = 3
