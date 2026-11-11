@@ -9,6 +9,7 @@ pub mod kind;
 pub mod logging;
 pub mod model;
 pub mod privacy;
+pub mod private;
 pub mod settings;
 
 /// Application identifier shared by the desktop entry, D-Bus name and settings.

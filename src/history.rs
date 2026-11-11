@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,7 +67,7 @@ fn invalid(msg: impl Into<String>) -> io::Error {
 impl HistoryStore {
     /// Opens the store in `dir`. An unreadable index is moved aside, never overwritten.
     pub fn open(dir: &Path, max_items: usize) -> (Self, LoadReport) {
-        if let Err(e) = fs::create_dir_all(dir) {
+        if let Err(e) = crate::private::create_dir(dir) {
             log::error!("cannot create data directory {}: {e}", dir.display());
         }
         let blob_dir = dir.join("blobs");
@@ -306,11 +306,7 @@ impl HistoryStore {
         };
         let json = serde_json::to_vec(&index).map_err(|e| invalid(e.to_string()))?;
         let tmp = self.dir.join(format!("{INDEX_FILE}.tmp"));
-        {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&json)?;
-            f.sync_all()?;
-        }
+        crate::private::write_file(&tmp, &json)?;
         fs::rename(&tmp, self.dir.join(INDEX_FILE))?;
         self.dirty = false;
         #[cfg(test)]
@@ -428,6 +424,23 @@ mod tests {
         let (s2, report) = HistoryStore::open(tmp.path(), 50);
         assert!(report.recovered_from_corrupt.is_none());
         assert_eq!(texts(&s2), ["second", "first"]);
+    }
+
+    #[test]
+    fn store_files_and_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        let (mut s, _) = HistoryStore::open(&dir, 50);
+        add(&mut s, "secret", 1);
+        s.save().unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("blobs")), 0o700);
+        assert_eq!(mode(&dir.join(INDEX_FILE)), 0o600);
+        let blob = BlobStore::open(&dir.join("blobs")).unwrap();
+        let name = blob.put(b"payload", "txt").unwrap();
+        assert_eq!(mode(&blob.path_of(&name)), 0o600);
     }
 
     #[test]

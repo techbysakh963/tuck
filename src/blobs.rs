@@ -26,7 +26,7 @@ pub fn blob_name(bytes: &[u8], ext: &str) -> String {
 
 impl BlobStore {
     pub fn open(dir: &Path) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
+        crate::private::create_dir(dir)?;
         Ok(Self::at(dir))
     }
 
@@ -48,9 +48,9 @@ impl BlobStore {
         if path.exists() {
             return Ok(name);
         }
-        fs::create_dir_all(&self.dir)?;
+        crate::private::create_dir(&self.dir)?;
         let tmp = self.dir.join(format!("{name}.tmp"));
-        fs::write(&tmp, bytes)?;
+        crate::private::write_file(&tmp, bytes)?;
         fs::rename(&tmp, &path)?;
         Ok(name)
     }
