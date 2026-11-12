@@ -219,7 +219,10 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
     );
 }
 
-/// The input code of the "v" key in the active layout.
+/// The input code of the "v" key, taken from the first layout that has one.
+/// With several layouts configured and a later one active, this can be the
+/// wrong key: GDK only reports the active layout from 4.18
+/// (`gdk_device_get_active_layout_index`), newer than the 4.14 Tuck supports.
 fn current_v_key() -> u16 {
     let entries: Vec<(u32, i32, i32)> = gdk::Display::default()
         .and_then(|d| d.map_keyval(gdk::Key::v))
