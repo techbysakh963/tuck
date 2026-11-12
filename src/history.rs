@@ -280,19 +280,24 @@ impl HistoryStore {
         source: Option<String>,
         now_ms: i64,
     ) -> io::Result<AddOutcome> {
-        let name = blob_name(png, "png");
-        let existing = self.items.iter().position(|i| match &i.content {
-            ClipContent::Image { blob, .. } => blob == &name,
-            _ => false,
-        });
-        if let Some(pos) = existing {
-            let id = self.items[pos].id;
-            self.items[pos].used_ms = now_ms;
-            self.changed();
+        if let Some(id) = self.touch_image(&blob_name(png, "png"), now_ms) {
             return Ok(AddOutcome::Moved(id));
         }
         let prepared = prepare_image(png, &self.blobs)?;
         Ok(self.add_prepared_image(prepared, source, now_ms))
+    }
+
+    /// Marks the item holding this image blob as just used; `None` when the
+    /// image is not in the history.
+    pub fn touch_image(&mut self, blob_name: &str, now_ms: i64) -> Option<ItemId> {
+        let pos = self.items.iter().position(|i| match &i.content {
+            ClipContent::Image { blob, .. } => blob == blob_name,
+            _ => false,
+        })?;
+        let id = self.items[pos].id;
+        self.items[pos].used_ms = self.items[pos].used_ms.max(now_ms);
+        self.changed();
+        Some(id)
     }
 
     /// Whether an item refers to this image blob.

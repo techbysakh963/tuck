@@ -21,6 +21,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use crate::blobs::blob_name;
 use crate::capture::Captured;
 use crate::capture::{self, CaptureEvent, CaptureStatus};
 use crate::echo::EchoGuard;
@@ -57,6 +58,7 @@ pub struct AppCtx {
     /// Bumped whenever the user wipes history or pauses recording, so an image
     /// that was being prepared meanwhile is not added afterwards.
     wipe_generation: Cell<u64>,
+    image_jobs: RefCell<ImageQueue<ImageJob>>,
     pub window: PopupWindow,
     pub app: adw::Application,
     pub filter: RefCell<PrivacyFilter>,
@@ -251,6 +253,7 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
         clipboard_holder: Cell::new(None),
         capture_seq: Cell::new(0),
         wipe_generation: Cell::new(0),
+        image_jobs: RefCell::default(),
         window,
         app: app.clone(),
         filter: RefCell::new(filter),
@@ -350,27 +353,18 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     match event.captured {
         // Decoding, scaling and writing an image can take long enough to stall the UI.
         Captured::Image { png } => {
-            let blobs = ctx.store.borrow().blob_store();
-            let source = event.source;
-            let generation = ctx.wipe_generation.get();
-            let ctx = ctx.clone();
-            glib::spawn_future_local(async move {
-                let started = Instant::now();
-                let prepared = gio::spawn_blocking(move || prepare_image(&png, &blobs)).await;
-                match prepared {
-                    Ok(Ok(prepared)) => {
-                        log::debug!("image prepared in {} ms", started.elapsed().as_millis());
-                        let paused = ctx.settings.borrow().paused;
-                        if keep_prepared_image(generation, ctx.wipe_generation.get(), paused) {
-                            add_prepared(&ctx, prepared, source, now, seq);
-                        } else {
-                            discard_prepared(&ctx, &prepared);
-                        }
-                    }
-                    Ok(Err(e)) => log::warn!("capture failed: {e}"),
-                    Err(_) => log::error!("image worker panicked"),
-                }
-            });
+            let job = ImageJob {
+                png,
+                source: event.source,
+                now,
+                seq,
+                generation: ctx.wipe_generation.get(),
+            };
+            let first = ctx.image_jobs.borrow_mut().submit(job);
+            if let Some(job) = first {
+                let ctx = ctx.clone();
+                glib::spawn_future_local(async move { run_image_jobs(&ctx, job).await });
+            }
         }
         captured => {
             let event = CaptureEvent { captured, ..event };
@@ -386,6 +380,106 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
                 Err(e) => log::warn!("capture failed: {e}"),
             }
         }
+    }
+}
+
+/// A copied image waiting for, or going through, preparation.
+struct ImageJob {
+    png: Vec<u8>,
+    source: Option<String>,
+    now: i64,
+    seq: u64,
+    generation: u64,
+}
+
+/// Prepares one image at a time so a burst of copies cannot start many
+/// decoders at once. While one runs only the newest waiting image is kept:
+/// an older one would be replaced on the clipboard before anyone could use it.
+struct ImageQueue<T> {
+    busy: bool,
+    waiting: Option<T>,
+}
+
+impl<T> Default for ImageQueue<T> {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            waiting: None,
+        }
+    }
+}
+
+impl<T> ImageQueue<T> {
+    /// Returns the job when it may start now; otherwise it waits, replacing
+    /// any older waiting job.
+    fn submit(&mut self, job: T) -> Option<T> {
+        if self.busy {
+            self.waiting = Some(job);
+            None
+        } else {
+            self.busy = true;
+            Some(job)
+        }
+    }
+
+    /// Called when the running job ended; returns the job to start next.
+    fn finish(&mut self) -> Option<T> {
+        let next = self.waiting.take();
+        self.busy = next.is_some();
+        next
+    }
+}
+
+async fn run_image_jobs(ctx: &Rc<AppCtx>, first: ImageJob) {
+    let mut job = first;
+    loop {
+        process_image_job(ctx, job).await;
+        match ctx.image_jobs.borrow_mut().finish() {
+            Some(next) => job = next,
+            None => break,
+        }
+    }
+}
+
+async fn process_image_job(ctx: &Rc<AppCtx>, job: ImageJob) {
+    let paused = ctx.settings.borrow().paused;
+    if !keep_prepared_image(job.generation, ctx.wipe_generation.get(), paused) {
+        return;
+    }
+    let ImageJob {
+        png,
+        source,
+        now,
+        seq,
+        generation,
+    } = job;
+    // Already in the history: nothing to decode or write.
+    let known = ctx
+        .store
+        .borrow_mut()
+        .touch_image(&blob_name(&png, "png"), now);
+    if let Some(id) = known {
+        if ctx.capture_seq.get() == seq {
+            ctx.clipboard_holder.set(Some(id));
+        }
+        stored(ctx);
+        return;
+    }
+    let blobs = ctx.store.borrow().blob_store();
+    let started = Instant::now();
+    let prepared = gio::spawn_blocking(move || prepare_image(&png, &blobs)).await;
+    match prepared {
+        Ok(Ok(prepared)) => {
+            log::debug!("image prepared in {} ms", started.elapsed().as_millis());
+            let paused = ctx.settings.borrow().paused;
+            if keep_prepared_image(generation, ctx.wipe_generation.get(), paused) {
+                add_prepared(ctx, prepared, source, now, seq);
+            } else {
+                discard_prepared(ctx, &prepared);
+            }
+        }
+        Ok(Err(e)) => log::warn!("capture failed: {e}"),
+        Err(_) => log::error!("image worker panicked"),
     }
 }
 
@@ -677,6 +771,18 @@ pub fn run() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_queue_runs_one_and_keeps_only_the_newest_waiting() {
+        let mut q = ImageQueue::default();
+        assert_eq!(q.submit(1), Some(1));
+        assert_eq!(q.submit(2), None);
+        assert_eq!(q.submit(3), None);
+        assert_eq!(q.finish(), Some(3));
+        assert_eq!(q.finish(), None);
+        // Idle again: the next image starts at once.
+        assert_eq!(q.submit(4), Some(4));
+    }
 
     #[test]
     fn image_dropped_after_wipe_or_pause() {
