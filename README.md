@@ -79,7 +79,7 @@ by default; on other GNOME systems install `gnome-shell-extension-appindicator`.
 - History lives under `~/.local/share/tuck`, settings under `~/.config/tuck`.
   Directories are mode 0700 and files 0600. The log at
   `~/.local/share/tuck/logs/tuck.log` does not contain clipboard content.
-- To wipe it, use "Clear all" in the popup, or delete `~/.local/share/tuck`.
+- To wipe it, use "Clear history" in the popup, or delete `~/.local/share/tuck`.
 
 ## Troubleshooting
 
