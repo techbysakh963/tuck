@@ -10,7 +10,9 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use super::clipboard_page::ClipboardPage;
+use super::grid_page::GridPage;
 use super::paste_flow::PasteMode;
+use super::symbols::{emoji_entries, symbol_entries};
 use super::AppCtx;
 
 const WIDTH: i32 = 380;
@@ -23,6 +25,8 @@ const PAGE_SYMBOLS: &str = "symbols";
 pub struct PopupWindow {
     pub window: adw::ApplicationWindow,
     pub clipboard: Rc<ClipboardPage>,
+    pub emoji: Rc<GridPage>,
+    pub symbols: Rc<GridPage>,
     pub search: gtk::SearchEntry,
     stack: gtk::Stack,
     overlay: adw::ToastOverlay,
@@ -39,12 +43,19 @@ fn tab(icon: &str, label: &str) -> gtk::ToggleButton {
     button
 }
 
-fn placeholder(icon: &str, title: &str) -> adw::StatusPage {
-    adw::StatusPage::builder()
-        .icon_name(icon)
-        .title(title)
-        .vexpand(true)
-        .build()
+/// Sends the search text to the page that is showing.
+fn route_query(
+    page: &str,
+    query: &str,
+    clipboard: &ClipboardPage,
+    emoji: &GridPage,
+    symbols: &GridPage,
+) {
+    match page {
+        PAGE_EMOJI => emoji.set_query(query),
+        PAGE_SYMBOLS => symbols.set_query(query),
+        _ => clipboard.set_query(query),
+    }
 }
 
 fn menu() -> gio::Menu {
@@ -64,18 +75,15 @@ fn menu() -> gio::Menu {
 impl PopupWindow {
     pub fn new(app: &adw::Application) -> Self {
         let clipboard = ClipboardPage::new();
+        let emoji = GridPage::new(emoji_entries(), true);
+        let symbols = GridPage::new(symbol_entries().to_vec(), false);
+        let search = gtk::SearchEntry::new();
 
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
         stack.add_named(&clipboard.root, Some(PAGE_CLIPBOARD));
-        stack.add_named(
-            &placeholder("face-smile-symbolic", "Emoji"),
-            Some(PAGE_EMOJI),
-        );
-        stack.add_named(
-            &placeholder("insert-text-symbolic", "Symbols"),
-            Some(PAGE_SYMBOLS),
-        );
+        stack.add_named(&emoji.root, Some(PAGE_EMOJI));
+        stack.add_named(&symbols.root, Some(PAGE_SYMBOLS));
 
         let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         tabs.add_css_class("linked");
@@ -92,9 +100,18 @@ impl PopupWindow {
             }
             let stack = stack.clone();
             let name = *name;
+            let (search, clipboard, emoji, symbols) = (
+                search.clone(),
+                clipboard.clone(),
+                emoji.clone(),
+                symbols.clone(),
+            );
             button.connect_toggled(move |b| {
                 if b.is_active() {
                     stack.set_visible_child_name(name);
+                    // The search text carries over to the page that opens.
+                    route_query(name, search.text().as_str(), &clipboard, &emoji, &symbols);
+                    search.grab_focus();
                 }
             });
             tabs.append(button);
@@ -117,7 +134,6 @@ impl PopupWindow {
         let handle = gtk::WindowHandle::new();
         handle.set_child(Some(&header));
 
-        let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Search"));
         search.set_margin_start(12);
         search.set_margin_end(12);
@@ -149,16 +165,28 @@ impl PopupWindow {
             glib::Propagation::Stop
         });
 
-        let page = Rc::downgrade(&clipboard);
+        let (stack_c, clipboard_c, emoji_c, symbols_c) = (
+            stack.clone(),
+            Rc::downgrade(&clipboard),
+            Rc::downgrade(&emoji),
+            Rc::downgrade(&symbols),
+        );
         search.connect_search_changed(move |e| {
-            if let Some(page) = page.upgrade() {
-                page.set_query(e.text().as_str());
+            if let (Some(c), Some(em), Some(sy), Some(name)) = (
+                clipboard_c.upgrade(),
+                emoji_c.upgrade(),
+                symbols_c.upgrade(),
+                stack_c.visible_child_name(),
+            ) {
+                route_query(&name, e.text().as_str(), &c, &em, &sy);
             }
         });
 
         Self {
             window,
             clipboard,
+            emoji,
+            symbols,
             search,
             stack,
             overlay,
@@ -168,6 +196,8 @@ impl PopupWindow {
     /// Wires focus-loss hiding and the keyboard shortcuts; call once.
     pub fn attach(&self, ctx: &Rc<AppCtx>) {
         self.clipboard.attach(ctx);
+        self.emoji.attach(ctx);
+        self.symbols.attach(ctx);
 
         // Losing focus closes the popup, except while one of our own dialogs
         // (About, Preferences) has it.
@@ -206,7 +236,22 @@ impl PopupWindow {
             return true;
         }
         if !self.on_clipboard_page() {
-            return false;
+            let grid = if self.stack.visible_child_name().as_deref() == Some(PAGE_EMOJI) {
+                &self.emoji
+            } else {
+                &self.symbols
+            };
+            return match key {
+                Key::Down if self.search.has_focus() || self.search.is_focus() => {
+                    grid.focus_grid();
+                    true
+                }
+                Key::Return | Key::KP_Enter if self.search.has_focus() => {
+                    grid.activate_first();
+                    true
+                }
+                _ => false,
+            };
         }
         match key {
             Key::Down => self.clipboard.move_selection(1),
@@ -237,6 +282,8 @@ impl PopupWindow {
     /// Resets transient state and focuses the search entry before showing.
     pub fn prepare_to_show(&self) {
         self.search.set_text("");
+        self.emoji.reset();
+        self.symbols.reset();
         self.clipboard.refresh(true);
     }
 

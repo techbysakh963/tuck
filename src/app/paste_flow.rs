@@ -111,3 +111,56 @@ fn fail(ctx: &AppCtx, message: &str) {
     log::warn!("{message}");
     ctx.queue_toast(message);
 }
+
+/// How long the target gets to read an inserted glyph before the previous
+/// clipboard contents return.
+const RESTORE_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Types a single emoji or symbol into the target without it becoming a
+/// history entry, then puts the previous clipboard item back.
+pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
+    let clipboard = ctx.window.window.clipboard();
+    let captured = Captured::Text {
+        text: glyph.to_string(),
+        html: None,
+    };
+    ctx.echo.borrow_mut().arm(fingerprint(&captured), now_ms());
+    let provider = gdk::ContentProvider::for_value(&glyph.to_value());
+    if let Err(e) = clipboard.set_content(Some(&provider)) {
+        fail(ctx, &format!("cannot set the clipboard: {e}"));
+        return;
+    }
+
+    hide_and_wait_for_target(ctx).await;
+
+    let combo = combo_for(ctx.target.get(), false);
+    if let Err(e) = ctx.keys.borrow_mut().send(combo) {
+        fail(ctx, &format!("insert failed: {e}"));
+        return;
+    }
+
+    glib::timeout_future(RESTORE_DELAY).await;
+    restore_previous(ctx);
+}
+
+/// Puts the most recently used history item back on the clipboard, arming the
+/// echo guard so the watcher does not count it as a new copy.
+fn restore_previous(ctx: &AppCtx) {
+    let id = ctx
+        .store
+        .borrow()
+        .items()
+        .iter()
+        .max_by_key(|i| i.used_ms)
+        .map(|i| i.id);
+    let Some(id) = id else { return };
+    match prepare(ctx, id) {
+        Ok(p) => {
+            ctx.echo.borrow_mut().arm(p.fingerprint, now_ms());
+            if let Err(e) = ctx.window.window.clipboard().set_content(Some(&p.provider)) {
+                log::warn!("cannot restore the clipboard: {e}");
+            }
+        }
+        Err(e) => log::warn!("cannot restore the clipboard: {e}"),
+    }
+}

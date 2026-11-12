@@ -1,8 +1,10 @@
 //! The resident application: actions, command line, capture wiring.
 
 pub mod clipboard_page;
+pub mod grid_page;
 pub mod paste_flow;
 pub mod row;
+pub mod symbols;
 pub mod window;
 
 use std::cell::{Cell, RefCell};
