@@ -459,10 +459,8 @@ async fn process_image_job(ctx: &Rc<AppCtx>, job: ImageJob) {
         generation,
     } = job;
     // Already in the history: nothing to decode or write.
-    let known = ctx
-        .store
-        .borrow_mut()
-        .touch_image(&blob_name(&png, "png"), now);
+    let name = blob_name(&png, "png");
+    let known = ctx.store.borrow_mut().touch_image(&name, now);
     if let Some(id) = known {
         if ctx.capture_seq.get() == seq {
             ctx.clipboard_holder.set(Some(id));
@@ -470,9 +468,15 @@ async fn process_image_job(ctx: &Rc<AppCtx>, job: ImageJob) {
         stored(ctx);
         return;
     }
-    let blobs = ctx.store.borrow().blob_store();
+    // A save while the worker writes must not prune the new blob.
+    let blobs = {
+        let mut store = ctx.store.borrow_mut();
+        store.hold_blob(&name);
+        store.blob_store()
+    };
     let started = Instant::now();
     let prepared = gio::spawn_blocking(move || prepare_image(&png, &blobs)).await;
+    ctx.store.borrow_mut().release_blob(&name);
     match prepared {
         Ok(Ok(prepared)) => {
             log::debug!("image prepared in {} ms", started.elapsed().as_millis());

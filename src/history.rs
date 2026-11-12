@@ -112,6 +112,8 @@ pub struct HistoryStore {
     max_blob_bytes: u64,
     dirty: bool,
     read_only: bool,
+    /// Blobs being written on another thread for items not added yet.
+    in_flight: HashSet<String>,
     #[cfg(test)]
     save_count: usize,
 }
@@ -189,6 +191,7 @@ impl HistoryStore {
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             dirty: false,
             read_only: report.newer_version.is_some(),
+            in_flight: HashSet::new(),
             #[cfg(test)]
             save_count: 0,
         };
@@ -311,6 +314,17 @@ impl HistoryStore {
     /// Where image blobs are written, for preparing an image on another thread.
     pub fn blob_store(&self) -> BlobStore {
         self.blobs.clone()
+    }
+
+    /// Keeps a blob, and the temporary file it is written through, from being
+    /// pruned while it is prepared for an item that is not in the index yet.
+    pub fn hold_blob(&mut self, name: &str) {
+        self.in_flight.insert(name.to_string());
+    }
+
+    /// Ends `hold_blob`, once the item was added or given up.
+    pub fn release_blob(&mut self, name: &str) {
+        self.in_flight.remove(name);
     }
 
     /// Adds an image whose blob and thumbnail `prepare_image` already produced.
@@ -498,7 +512,7 @@ impl HistoryStore {
         {
             self.save_count += 1;
         }
-        let keep: HashSet<String> = self
+        let mut keep: HashSet<String> = self
             .items
             .iter()
             .filter_map(|i| match &i.content {
@@ -510,6 +524,10 @@ impl HistoryStore {
                 _ => None,
             })
             .collect();
+        for name in &self.in_flight {
+            keep.insert(name.clone());
+            keep.insert(format!("{name}.tmp"));
+        }
         self.blobs.prune(&keep);
         Ok(())
     }
@@ -752,6 +770,28 @@ mod tests {
         assert_eq!(texts(&s), ["d", "c", "b"]);
         s.save().unwrap();
         assert_eq!(fs::read_dir(&blob_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn saving_keeps_a_blob_that_is_still_being_prepared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let blobs = s.blob_store();
+        let name = blob_name(b"not added yet", "png");
+        let partial = blobs.path_of(&format!("{name}.tmp"));
+        s.hold_blob(&name);
+        fs::write(&partial, b"half").unwrap();
+        add(&mut s, "a", 1);
+        s.save().unwrap();
+        assert!(partial.exists(), "a blob being written must survive a save");
+        assert_eq!(blobs.put(b"not added yet", "png").unwrap(), name);
+        add(&mut s, "b", 2);
+        s.save().unwrap();
+        assert!(blobs.get(&name).is_ok());
+        s.release_blob(&name);
+        add(&mut s, "c", 3);
+        s.save().unwrap();
+        assert!(blobs.get(&name).is_err(), "an abandoned blob is pruned");
     }
 
     #[test]
