@@ -176,6 +176,9 @@ impl Watcher<'_> {
     /// bytes, following an INCR transfer when the owner uses one.
     fn convert(&mut self, target: Atom) -> Option<Vec<u8>> {
         let deadline = Instant::now() + TRANSFER_TIMEOUT;
+        // A stale value left by an abandoned request must not be taken for
+        // this answer.
+        self.conn.delete_property(self.win, self.atoms.prop).ok()?;
         self.conn
             .convert_selection(
                 self.win,
@@ -190,7 +193,9 @@ impl Watcher<'_> {
         // Wait for the owner's answer.
         loop {
             match self.next_event(deadline)? {
-                Event::SelectionNotify(e) if e.requestor == self.win => {
+                Event::SelectionNotify(e)
+                    if is_answer_to(&e, self.win, self.atoms.clipboard, target) =>
+                {
                     if e.property == x11rb::NONE {
                         return None;
                     }
@@ -356,4 +361,42 @@ fn connect_with_fd() -> Result<(RustConnection, usize, RawFd), String> {
         }
     }
     Err(format!("X11 connect: {last_error}"))
+}
+
+/// Whether a `SelectionNotify` answers the request we are waiting on; a late
+/// reply to an earlier, timed-out request must be ignored.
+fn is_answer_to(
+    e: &x11rb::protocol::xproto::SelectionNotifyEvent,
+    win: u32,
+    selection: Atom,
+    target: Atom,
+) -> bool {
+    e.requestor == win && e.selection == selection && e.target == target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x11rb::protocol::xproto::SelectionNotifyEvent;
+
+    fn notify(requestor: u32, selection: Atom, target: Atom) -> SelectionNotifyEvent {
+        SelectionNotifyEvent {
+            response_type: 31,
+            sequence: 0,
+            time: 0,
+            requestor,
+            selection,
+            target,
+            property: 0,
+        }
+    }
+
+    #[test]
+    fn only_the_pending_request_is_accepted() {
+        let e = notify(7, 10, 20);
+        assert!(is_answer_to(&e, 7, 10, 20));
+        assert!(!is_answer_to(&e, 8, 10, 20));
+        assert!(!is_answer_to(&e, 7, 11, 20));
+        assert!(!is_answer_to(&e, 7, 10, 21));
+    }
 }
