@@ -2,11 +2,12 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::capture::{CaptureEvent, Captured};
 use crate::echo::{fingerprint, EchoGuard};
-use crate::history::{AddOutcome, HistoryStore};
+use crate::files::file_uri;
+use crate::history::{AddOutcome, HistoryStore, INLINE_TEXT_MAX};
 use crate::privacy::PrivacyFilter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,12 +90,13 @@ pub fn store_event(
                     Err(e) => return Err(e),
                 }
             }
-            let text = paths
-                .iter()
-                .map(|p| file_uri(p))
-                .collect::<Vec<_>>()
-                .join("\n");
-            store.add_text(text, None, ev.source, now_ms)?
+            let uris: Vec<String> = paths.iter().map(|p| file_uri(p)).collect();
+            // A huge list would bloat the index; keep it as text, which spills to a blob.
+            if uris.iter().map(String::len).sum::<usize>() <= INLINE_TEXT_MAX {
+                store.add_files(uris, ev.source, now_ms)
+            } else {
+                store.add_text(uris.join("\n"), None, ev.source, now_ms)?
+            }
         }
     };
     Ok(IngestResult::Stored(outcome))
@@ -121,19 +123,6 @@ fn single_png_file(paths: &[PathBuf]) -> Option<Vec<u8>> {
         return None;
     }
     fs::read(path).ok()
-}
-
-fn file_uri(path: &Path) -> String {
-    let mut out = String::from("file://");
-    for b in path.to_string_lossy().bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -272,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn other_file_lists_store_file_uris() {
+    fn other_file_lists_are_stored_as_files() {
         let mut f = fixture(&[]);
         let ev = CaptureEvent {
             captured: Captured::Files(vec![
@@ -285,8 +274,8 @@ mod tests {
             panic!("expected stored");
         };
         assert_eq!(
-            f.store.full_text(out.id()).unwrap(),
-            "file:///home/u/My%20Notes.txt\nfile:///home/u/b.txt"
+            f.store.file_uris(out.id()).unwrap(),
+            ["file:///home/u/My%20Notes.txt", "file:///home/u/b.txt"]
         );
     }
 }

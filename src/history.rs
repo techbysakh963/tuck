@@ -58,6 +58,11 @@ pub struct LoadReport {
 
 /// Format version written to `history.json`. Files without a version are version 1.
 const INDEX_VERSION: u32 = 1;
+/// Version written once the history holds a copied-files item, which older
+/// versions cannot read; they then leave the file alone instead of resetting it.
+const FILES_INDEX_VERSION: u32 = 2;
+/// Newest format this version can read.
+const MAX_INDEX_VERSION: u32 = FILES_INDEX_VERSION;
 
 fn default_version() -> u32 {
     INDEX_VERSION
@@ -138,9 +143,9 @@ impl HistoryStore {
             Ok(bytes) => match serde_json::from_slice::<IndexFile>(&bytes) {
                 Ok(index) => index,
                 Err(e) => match serde_json::from_slice::<VersionProbe>(&bytes) {
-                    Ok(probe) if probe.version > INDEX_VERSION => {
+                    Ok(probe) if probe.version > MAX_INDEX_VERSION => {
                         log::warn!(
-                            "history index has format version {}, newer than {INDEX_VERSION}; leaving it untouched",
+                            "history index has format version {}, newer than {MAX_INDEX_VERSION}; leaving it untouched",
                             probe.version
                         );
                         report.newer_version = Some(probe.version);
@@ -160,10 +165,10 @@ impl HistoryStore {
                 IndexFile::default()
             }
         };
-        if index.version > INDEX_VERSION {
+        if index.version > MAX_INDEX_VERSION {
             report.newer_version = Some(index.version);
             log::warn!(
-                "history index has format version {}, newer than {INDEX_VERSION}; leaving it untouched",
+                "history index has format version {}, newer than {MAX_INDEX_VERSION}; leaving it untouched",
                 index.version
             );
         }
@@ -214,7 +219,7 @@ impl HistoryStore {
         };
         let existing = self.items.iter().position(|i| match &i.content {
             ClipContent::Text { text, .. } => text == &body,
-            ClipContent::Image { .. } => false,
+            _ => false,
         });
         if let Some(pos) = existing {
             let item = &mut self.items[pos];
@@ -239,6 +244,36 @@ impl HistoryStore {
         Ok(AddOutcome::Added(id))
     }
 
+    /// Records a list of copied files, given as `file://` URIs.
+    pub fn add_files(
+        &mut self,
+        uris: Vec<String>,
+        source: Option<String>,
+        now_ms: i64,
+    ) -> AddOutcome {
+        let existing = self.items.iter().position(|i| match &i.content {
+            ClipContent::Files { uris: u } => u == &uris,
+            _ => false,
+        });
+        if let Some(pos) = existing {
+            let id = self.items[pos].id;
+            self.items[pos].used_ms = now_ms;
+            self.changed();
+            return AddOutcome::Moved(id);
+        }
+        let id = self.new_id();
+        self.items.push(ClipItem {
+            id,
+            content: ClipContent::Files { uris },
+            created_ms: now_ms,
+            used_ms: now_ms,
+            pinned: false,
+            source,
+        });
+        self.changed();
+        AddOutcome::Added(id)
+    }
+
     pub fn add_image(
         &mut self,
         png: &[u8],
@@ -248,7 +283,7 @@ impl HistoryStore {
         let name = blob_name(png, "png");
         let existing = self.items.iter().position(|i| match &i.content {
             ClipContent::Image { blob, .. } => blob == &name,
-            ClipContent::Text { .. } => false,
+            _ => false,
         });
         if let Some(pos) = existing {
             let id = self.items[pos].id;
@@ -274,7 +309,7 @@ impl HistoryStore {
     ) -> AddOutcome {
         let existing = self.items.iter().position(|i| match &i.content {
             ClipContent::Image { blob, .. } => blob == &prepared.blob,
-            ClipContent::Text { .. } => false,
+            _ => false,
         });
         if let Some(pos) = existing {
             let id = self.items[pos].id;
@@ -320,7 +355,16 @@ impl HistoryStore {
                 text: TextBody::Blob { name, .. },
                 ..
             }) => Ok(String::from_utf8_lossy(&self.blobs.get(name)?).into_owned()),
-            Some(ClipContent::Image { .. }) => Err(invalid("item is an image")),
+            Some(_) => Err(invalid("item is not text")),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "no such item")),
+        }
+    }
+
+    /// The `file://` URIs of a copied-files item.
+    pub fn file_uris(&self, id: ItemId) -> io::Result<Vec<String>> {
+        match self.get(id).map(|i| &i.content) {
+            Some(ClipContent::Files { uris }) => Ok(uris.clone()),
+            Some(_) => Err(invalid("item is not a file list")),
             None => Err(io::Error::new(io::ErrorKind::NotFound, "no such item")),
         }
     }
@@ -419,8 +463,16 @@ impl HistoryStore {
         if !self.dirty || self.read_only {
             return Ok(());
         }
+        let has_files = self
+            .items
+            .iter()
+            .any(|i| matches!(i.content, ClipContent::Files { .. }));
         let index = IndexFile {
-            version: INDEX_VERSION,
+            version: if has_files {
+                FILES_INDEX_VERSION
+            } else {
+                INDEX_VERSION
+            },
             next_id: self.next_id,
             items: self.items.clone(),
         };
@@ -601,6 +653,7 @@ mod tests {
             .map(|i| match &i.content {
                 ClipContent::Text { text, .. } => text.preview().to_string(),
                 ClipContent::Image { .. } => "<image>".into(),
+                ClipContent::Files { uris } => uris.join("|"),
             })
             .collect()
     }
@@ -807,6 +860,34 @@ mod tests {
         assert!(report.newer_version.is_none() && report.recovered_from_corrupt.is_none());
         assert_eq!(texts(&s), ["old"]);
         add(&mut s, "new", 2);
+        s.save().unwrap();
+        let saved = fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap();
+        assert!(saved.contains("\"version\":1"), "{saved}");
+    }
+
+    #[test]
+    fn file_items_round_trip_and_mark_the_index_version_two() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        add(&mut s, "plain", 1);
+        let uris = vec!["file:///home/u/a%20b.txt".to_string()];
+        let id = s.add_files(uris.clone(), None, 2).id();
+        // The same list again moves the item instead of adding another.
+        assert!(matches!(s.add_files(uris.clone(), None, 3), AddOutcome::Moved(i) if i == id));
+        s.save().unwrap();
+        let saved = fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap();
+        assert!(saved.contains("\"version\":2"), "{saved}");
+        let (s2, report) = HistoryStore::open(tmp.path(), 50);
+        assert!(report.newer_version.is_none() && report.recovered_from_corrupt.is_none());
+        assert_eq!(s2.file_uris(id).unwrap(), uris);
+        assert_eq!(s2.items().len(), 2);
+    }
+
+    #[test]
+    fn history_without_files_keeps_writing_version_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        add(&mut s, "plain", 1);
         s.save().unwrap();
         let saved = fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap();
         assert!(saved.contains("\"version\":1"), "{saved}");

@@ -25,6 +25,9 @@ pub fn filter_items<'a>(items: &'a [ClipItem], query: &str) -> Vec<&'a ClipItem>
             let haystack = match &item.content {
                 ClipContent::Text { text, .. } => text.head().to_lowercase(),
                 ClipContent::Image { .. } => "image".to_string(),
+                ClipContent::Files { uris } => {
+                    format!("file {}", crate::files::display_names(uris).to_lowercase())
+                }
             };
             terms.iter().all(|t| haystack.contains(t.as_str()))
         })

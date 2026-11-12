@@ -43,6 +43,8 @@ pub enum ClipContent {
         text: TextBody,
         html: Option<String>,
     },
+    /// Copied files, kept as `file://` URIs so any path survives the JSON index.
+    Files { uris: Vec<String> },
     Image {
         /// Blob name of the full-size PNG.
         blob: String,

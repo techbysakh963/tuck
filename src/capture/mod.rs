@@ -260,7 +260,7 @@ pub(crate) fn read_capture(
 
 /// Parses a `text/uri-list` body into local paths; other schemes and
 /// comments are skipped.
-pub(crate) fn parse_uri_list(raw: &str) -> Vec<PathBuf> {
+pub fn parse_uri_list(raw: &str) -> Vec<PathBuf> {
     raw.lines()
         .filter_map(|line| {
             let rest = line.trim().strip_prefix("file://")?;

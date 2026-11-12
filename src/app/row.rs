@@ -18,6 +18,7 @@ pub fn item_title(item: &ClipItem) -> String {
     match &item.content {
         ClipContent::Text { text, .. } => one_line(text.head()),
         ClipContent::Image { width, height, .. } => format!("Image, {width} × {height}"),
+        ClipContent::Files { uris } => crate::files::display_names(uris),
     }
 }
 
@@ -55,6 +56,11 @@ pub fn build_row(item: &ClipItem, now_ms: i64) -> adw::ActionRow {
                     row.add_prefix(&swatch);
                 }
             }
+        }
+        ClipContent::Files { .. } => {
+            let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
+            icon.add_css_class("dim-label");
+            row.add_prefix(&icon);
         }
         ClipContent::Image { thumb_png, .. } => {
             if let Some(picture) = thumbnail(thumb_png) {

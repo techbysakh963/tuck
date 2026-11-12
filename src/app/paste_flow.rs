@@ -73,6 +73,26 @@ fn prepare(ctx: &AppCtx, id: ItemId) -> Result<Prepared, String> {
                 fingerprint: fp,
             })
         }
+        ClipContent::Files { .. } => {
+            let uris = store
+                .file_uris(id)
+                .map_err(|e| format!("cannot read the item: {e}"))?;
+            let fp = fingerprint(&Captured::Files(crate::files::paths_of(&uris)));
+            let p = crate::files::payloads(&uris);
+            let bytes = |s: &str| glib::Bytes::from(s.as_bytes());
+            let provider = gdk::ContentProvider::new_union(&[
+                gdk::ContentProvider::for_bytes(
+                    "x-special/gnome-copied-files",
+                    &bytes(&p.gnome_copied),
+                ),
+                gdk::ContentProvider::for_bytes("text/uri-list", &bytes(&p.uri_list)),
+                gdk::ContentProvider::for_value(&p.plain.to_value()),
+            ]);
+            Ok(Prepared {
+                provider,
+                fingerprint: fp,
+            })
+        }
         ClipContent::Image { .. } => {
             let png = store
                 .image_png(id)

@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod blobs;
 pub mod capture;
 pub mod echo;
+pub mod files;
 pub mod history;
 pub mod ingest;
 pub mod kind;
