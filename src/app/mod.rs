@@ -54,6 +54,9 @@ pub struct AppCtx {
     pub clipboard_holder: Cell<paste_flow::ClipboardHolder>,
     /// Counts clipboard events, so a slow image capture can tell it is stale.
     capture_seq: Cell<u64>,
+    /// Bumped whenever the user wipes history or pauses recording, so an image
+    /// that was being prepared meanwhile is not added afterwards.
+    wipe_generation: Cell<u64>,
     pub window: PopupWindow,
     pub app: adw::Application,
     pub filter: RefCell<PrivacyFilter>,
@@ -120,6 +123,12 @@ impl AppCtx {
     pub fn queue_toast(&self, message: &str) {
         self.toasts.borrow_mut().push(message.to_string());
     }
+}
+
+/// Whether an image prepared in the background may still be added: not after
+/// the history was wiped or recording paused since the copy happened.
+fn keep_prepared_image(started_generation: u64, current_generation: u64, paused: bool) -> bool {
+    started_generation == current_generation && !paused
 }
 
 pub fn now_ms() -> i64 {
@@ -241,6 +250,7 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
         target: Cell::new(TargetKind::Unknown),
         clipboard_holder: Cell::new(None),
         capture_seq: Cell::new(0),
+        wipe_generation: Cell::new(0),
         window,
         app: app.clone(),
         filter: RefCell::new(filter),
@@ -342,6 +352,7 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
         Captured::Image { png } => {
             let blobs = ctx.store.borrow().blob_store();
             let source = event.source;
+            let generation = ctx.wipe_generation.get();
             let ctx = ctx.clone();
             glib::spawn_future_local(async move {
                 let started = Instant::now();
@@ -349,7 +360,12 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
                 match prepared {
                     Ok(Ok(prepared)) => {
                         log::debug!("image prepared in {} ms", started.elapsed().as_millis());
-                        add_prepared(&ctx, prepared, source, now, seq);
+                        let paused = ctx.settings.borrow().paused;
+                        if keep_prepared_image(generation, ctx.wipe_generation.get(), paused) {
+                            add_prepared(&ctx, prepared, source, now, seq);
+                        } else {
+                            discard_prepared(&ctx, &prepared);
+                        }
                     }
                     Ok(Err(e)) => log::warn!("capture failed: {e}"),
                     Err(_) => log::error!("image worker panicked"),
@@ -391,6 +407,16 @@ fn add_prepared(
     stored(ctx);
 }
 
+/// Removes the blob of an image that is not going to be added, unless an
+/// existing item shares it.
+fn discard_prepared(ctx: &AppCtx, prepared: &PreparedImage) {
+    log::debug!("dropped an image copied before the history was wiped or paused");
+    let store = ctx.store.borrow();
+    if !store.has_image_blob(&prepared.blob) {
+        store.blob_store().remove(&prepared.blob);
+    }
+}
+
 fn stored(ctx: &Rc<AppCtx>) {
     schedule_save(ctx);
     if ctx.window.is_visible() {
@@ -426,6 +452,9 @@ fn install_actions(ctx: &Rc<AppCtx>) {
             .and_then(|s| s.get::<bool>())
             .unwrap_or(false);
         action.set_state(&now_paused.to_variant());
+        if now_paused {
+            c.wipe_generation.set(c.wipe_generation.get() + 1);
+        }
         {
             let mut settings = c.settings.borrow_mut();
             settings.paused = now_paused;
@@ -442,6 +471,7 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let clear = gio::SimpleAction::new("clear", None);
     let c = ctx.clone();
     clear.connect_activate(move |_, _| {
+        c.wipe_generation.set(c.wipe_generation.get() + 1);
         {
             let mut store = c.store.borrow_mut();
             store.clear_unpinned();
@@ -642,4 +672,16 @@ pub fn run() -> glib::ExitCode {
     });
 
     app.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_dropped_after_wipe_or_pause() {
+        assert!(keep_prepared_image(3, 3, false));
+        assert!(!keep_prepared_image(3, 4, false));
+        assert!(!keep_prepared_image(3, 3, true));
+    }
 }

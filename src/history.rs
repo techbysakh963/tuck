@@ -295,6 +295,14 @@ impl HistoryStore {
         Ok(self.add_prepared_image(prepared, source, now_ms))
     }
 
+    /// Whether an item refers to this image blob.
+    pub fn has_image_blob(&self, name: &str) -> bool {
+        self.items.iter().any(|i| match &i.content {
+            ClipContent::Image { blob, .. } => blob == name,
+            _ => false,
+        })
+    }
+
     /// Where image blobs are written, for preparing an image on another thread.
     pub fn blob_store(&self) -> BlobStore {
         self.blobs.clone()
