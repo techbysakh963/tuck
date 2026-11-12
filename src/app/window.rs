@@ -29,6 +29,7 @@ pub struct PopupWindow {
     pub symbols: Rc<GridPage>,
     pub search: gtk::SearchEntry,
     stack: gtk::Stack,
+    menu_button: gtk::MenuButton,
     overlay: adw::ToastOverlay,
 }
 
@@ -56,6 +57,12 @@ fn route_query(
         PAGE_SYMBOLS => symbols.set_query(query),
         _ => clipboard.set_query(query),
     }
+}
+
+/// The popup's own shortcuts apply only while nothing else (a dialog or the
+/// menu) is in front; otherwise Enter, Delete and Esc belong to that.
+fn popup_keys_apply(dialog_open: bool, menu_open: bool) -> bool {
+    !dialog_open && !menu_open
 }
 
 fn menu() -> gio::Menu {
@@ -189,6 +196,7 @@ impl PopupWindow {
             symbols,
             search,
             stack,
+            menu_button,
             overlay,
         }
     }
@@ -229,6 +237,10 @@ impl PopupWindow {
 
     fn handle_key(&self, key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
         use gtk::gdk::{Key, ModifierType};
+        let menu_open = self.menu_button.popover().is_some_and(|p| p.is_visible());
+        if !popup_keys_apply(self.window.visible_dialog().is_some(), menu_open) {
+            return false;
+        }
         let ctrl = state.contains(ModifierType::CONTROL_MASK);
         let shift = state.contains(ModifierType::SHIFT_MASK);
         if key == Key::Escape {
@@ -302,5 +314,17 @@ impl PopupWindow {
 
     pub fn add_toast(&self, message: &str) {
         self.overlay.add_toast(adw::Toast::new(message));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_keys_stand_aside_for_dialogs_and_menu() {
+        assert!(popup_keys_apply(false, false));
+        assert!(!popup_keys_apply(true, false));
+        assert!(!popup_keys_apply(false, true));
     }
 }
