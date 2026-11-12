@@ -37,12 +37,53 @@ impl AddOutcome {
 pub struct LoadReport {
     /// Set when the index could not be read and was set aside under this name.
     pub recovered_from_corrupt: Option<PathBuf>,
+    /// Set when the index was written by a newer version; it is left untouched
+    /// and nothing is saved during this session.
+    pub newer_version: Option<u32>,
+    /// Set when the data or blob directory could not be created.
+    pub dir_unavailable: bool,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+/// Format version written to `history.json`. Files without a version are version 1.
+const INDEX_VERSION: u32 = 1;
+
+fn default_version() -> u32 {
+    INDEX_VERSION
+}
+
+#[derive(Serialize, Deserialize)]
 struct IndexFile {
+    #[serde(default = "default_version")]
+    version: u32,
     next_id: ItemId,
     items: Vec<ClipItem>,
+}
+
+impl Default for IndexFile {
+    fn default() -> Self {
+        Self {
+            version: INDEX_VERSION,
+            next_id: 0,
+            items: Vec::new(),
+        }
+    }
+}
+
+/// Reads only the version, so a newer file is recognised even when its items do not parse.
+#[derive(Deserialize)]
+struct VersionProbe {
+    #[serde(default = "default_version")]
+    version: u32,
+}
+
+/// Error category and position only: serde messages can quote file content.
+fn describe(e: &serde_json::Error) -> String {
+    format!(
+        "{:?} at line {}, column {}",
+        e.classify(),
+        e.line(),
+        e.column()
+    )
 }
 
 pub struct HistoryStore {
@@ -52,6 +93,7 @@ pub struct HistoryStore {
     next_id: ItemId,
     max_items: usize,
     dirty: bool,
+    read_only: bool,
     #[cfg(test)]
     save_count: usize,
 }
@@ -67,24 +109,36 @@ fn invalid(msg: impl Into<String>) -> io::Error {
 impl HistoryStore {
     /// Opens the store in `dir`. An unreadable index is moved aside, never overwritten.
     pub fn open(dir: &Path, max_items: usize) -> (Self, LoadReport) {
+        let mut report = LoadReport::default();
         if let Err(e) = crate::private::create_dir(dir) {
             log::error!("cannot create data directory {}: {e}", dir.display());
+            report.dir_unavailable = true;
         }
         let blob_dir = dir.join("blobs");
         let blobs = BlobStore::open(&blob_dir).unwrap_or_else(|e| {
             log::error!("cannot create blob directory {}: {e}", blob_dir.display());
+            report.dir_unavailable = true;
             BlobStore::at(&blob_dir)
         });
-        let mut report = LoadReport::default();
         let index_path = dir.join(INDEX_FILE);
         let index = match fs::read(&index_path) {
             Ok(bytes) => match serde_json::from_slice::<IndexFile>(&bytes) {
                 Ok(index) => index,
-                Err(e) => {
-                    log::error!("history index is corrupt: {e}");
-                    report.recovered_from_corrupt = set_aside(&index_path);
-                    IndexFile::default()
-                }
+                Err(e) => match serde_json::from_slice::<VersionProbe>(&bytes) {
+                    Ok(probe) if probe.version > INDEX_VERSION => {
+                        log::warn!(
+                            "history index has format version {}, newer than {INDEX_VERSION}; leaving it untouched",
+                            probe.version
+                        );
+                        report.newer_version = Some(probe.version);
+                        IndexFile::default()
+                    }
+                    _ => {
+                        log::error!("history index is corrupt: {}", describe(&e));
+                        report.recovered_from_corrupt = set_aside(&index_path);
+                        IndexFile::default()
+                    }
+                },
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => IndexFile::default(),
             Err(e) => {
@@ -93,6 +147,13 @@ impl HistoryStore {
                 IndexFile::default()
             }
         };
+        if index.version > INDEX_VERSION {
+            report.newer_version = Some(index.version);
+            log::warn!(
+                "history index has format version {}, newer than {INDEX_VERSION}; leaving it untouched",
+                index.version
+            );
+        }
         let next_id = index
             .items
             .iter()
@@ -108,6 +169,7 @@ impl HistoryStore {
             next_id,
             max_items: max_items.max(1),
             dirty: false,
+            read_only: report.newer_version.is_some(),
             #[cfg(test)]
             save_count: 0,
         };
@@ -295,12 +357,19 @@ impl HistoryStore {
         self.dirty
     }
 
+    /// Deletes any `history.corrupt-*.json` copy left by an earlier unreadable index.
+    pub fn discard_corrupt_backups(&self) {
+        remove_corrupt_copies(&self.dir, None);
+    }
+
     /// Writes the index atomically and deletes blobs no item refers to any more.
     pub fn save(&mut self) -> io::Result<()> {
-        if !self.dirty {
+        // A file from a newer version stays exactly as it is.
+        if !self.dirty || self.read_only {
             return Ok(());
         }
         let index = IndexFile {
+            version: INDEX_VERSION,
             next_id: self.next_id,
             items: self.items.clone(),
         };
@@ -376,10 +445,28 @@ fn set_aside(path: &Path) -> Option<PathBuf> {
         .unwrap_or(0);
     let backup = path.with_file_name(format!("history.corrupt-{secs}.json"));
     match fs::rename(path, &backup) {
-        Ok(()) => Some(backup),
+        Ok(()) => {
+            if let Some(dir) = backup.parent() {
+                remove_corrupt_copies(dir, Some(&backup));
+            }
+            Some(backup)
+        }
         Err(e) => {
             log::error!("cannot back up corrupt history: {e}");
             None
+        }
+    }
+}
+
+/// Removes `history.corrupt-*` files in `dir`, except `keep`.
+fn remove_corrupt_copies(dir: &Path, keep: Option<&Path>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("history.corrupt-") && Some(entry.path().as_path()) != keep {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -586,5 +673,94 @@ mod tests {
         s.set_pinned(old, true);
         assert_eq!(s.prune_older_than(500, 1000), 1);
         assert_eq!(texts(&s), ["old pinned", "new"]);
+    }
+
+    fn write_index(dir: &Path, json: &str) {
+        fs::write(dir.join(INDEX_FILE), json).unwrap();
+    }
+
+    #[test]
+    fn index_without_version_loads_as_version_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_index(
+            tmp.path(),
+            r#"{"next_id":5,"items":[{"id":4,"content":{"Text":{"text":{"Inline":"old"},"html":null}},"created_ms":1,"used_ms":1,"pinned":false,"source":null}]}"#,
+        );
+        let (mut s, report) = HistoryStore::open(tmp.path(), 50);
+        assert!(report.newer_version.is_none() && report.recovered_from_corrupt.is_none());
+        assert_eq!(texts(&s), ["old"]);
+        add(&mut s, "new", 2);
+        s.save().unwrap();
+        let saved = fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap();
+        assert!(saved.contains("\"version\":1"), "{saved}");
+    }
+
+    #[test]
+    fn index_with_version_one_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_index(tmp.path(), r#"{"version":1,"next_id":1,"items":[]}"#);
+        let (_, report) = HistoryStore::open(tmp.path(), 50);
+        assert!(report.newer_version.is_none() && report.recovered_from_corrupt.is_none());
+    }
+
+    #[test]
+    fn newer_index_is_left_untouched_and_never_saved_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = r#"{"version":99,"next_id":1,"items":[],"layout":"new"}"#;
+        write_index(tmp.path(), original);
+        let (mut s, report) = HistoryStore::open(tmp.path(), 50);
+        assert_eq!(report.newer_version, Some(99));
+        assert!(report.recovered_from_corrupt.is_none());
+        add(&mut s, "x", 1);
+        s.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2); // index and blobs
+    }
+
+    #[test]
+    fn newer_index_with_unreadable_items_is_still_not_treated_as_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = r#"{"version":99,"entries":"different shape"}"#;
+        write_index(tmp.path(), original);
+        let (_, report) = HistoryStore::open(tmp.path(), 50);
+        assert_eq!(report.newer_version, Some(99));
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(INDEX_FILE)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn only_newest_corrupt_copy_is_kept_and_clear_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stale = tmp.path().join("history.corrupt-1.json");
+        fs::write(&stale, b"old").unwrap();
+        write_index(tmp.path(), "{not json");
+        let (s, report) = HistoryStore::open(tmp.path(), 50);
+        let backup = report.recovered_from_corrupt.unwrap();
+        assert!(backup.exists() && !stale.exists());
+        s.discard_corrupt_backups();
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn unavailable_data_dir_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("occupied");
+        fs::write(&file, b"x").unwrap();
+        let (_, report) = HistoryStore::open(&file.join("data"), 50);
+        assert!(report.dir_unavailable);
+    }
+
+    #[test]
+    fn parse_error_description_does_not_quote_content() {
+        let err = serde_json::from_str::<IndexFile>(r#"{"next_id":"hunter2-secret","items":[]}"#)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("hunter2"), "premise: serde quotes");
+        assert!(!describe(&err).contains("hunter2"));
     }
 }

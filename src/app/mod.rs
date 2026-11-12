@@ -156,7 +156,19 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
     }
     if let Some(path) = report.recovered_from_corrupt {
         log::warn!("history was unreadable, moved to {}", path.display());
-        toasts.push("History could not be read and was reset. The old file was kept.".to_string());
+        toasts.push(format!(
+            "History could not be read and was reset. The old file was kept as {}.",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    if report.newer_version.is_some() {
+        toasts.push(
+            "History was saved by a newer Tuck. It is left unchanged and new copies are not saved."
+                .to_string(),
+        );
+    }
+    if report.dir_unavailable {
+        toasts.push("Cannot create the history folder. History will not be saved.".to_string());
     }
 
     let is_x11 = std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty());
@@ -321,7 +333,11 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let clear = gio::SimpleAction::new("clear", None);
     let c = ctx.clone();
     clear.connect_activate(move |_, _| {
-        c.store.borrow_mut().clear_unpinned();
+        {
+            let mut store = c.store.borrow_mut();
+            store.clear_unpinned();
+            store.discard_corrupt_backups();
+        }
         schedule_save(&c);
         c.window.clipboard.refresh(false);
     });
