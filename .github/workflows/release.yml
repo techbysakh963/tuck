@@ -3,12 +3,47 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the tag matches the package version
+        run: |
+          version=$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+          grep -q "<release version=\"$version\"" data/io.github.techbysakh963.Tuck.metainfo.xml \
+            || { echo "metainfo has no release entry for $version" >&2; exit 1; }
+          grep -q "^## \[$version\]" CHANGELOG.md \
+            || echo "::warning::CHANGELOG.md has no section for $version"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libxkbcommon-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
   deb:
+    needs: verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -18,32 +53,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libxkbcommon-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-deb --locked
-      - run: cargo deb
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo install cargo-deb --version 3.8.0 --locked
+      - run: cargo deb --locked
       - uses: actions/upload-artifact@v4
         with:
           name: deb
           path: target/debian/*.deb
 
   rpm:
+    needs: verify
     runs-on: ubuntu-latest
+    # Fedora 40 keeps the binary linked against the GTK 4.14 and glibc baseline;
+    # its own Rust is too old, so the toolchain comes from rustup.
     container: fedora:40
     steps:
       - name: Install build dependencies
-        run: dnf install -y gcc git pkgconf-pkg-config gtk4-devel libadwaita-devel libxkbcommon-devel rust cargo
+        run: dnf install -y gcc git pkgconf-pkg-config gtk4-devel libadwaita-devel libxkbcommon-devel
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: cargo install cargo-generate-rpm --locked
-      - run: cargo build --release
-      - run: ~/.cargo/bin/cargo-generate-rpm
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo install cargo-generate-rpm --version 0.21.1 --locked
+      - run: cargo build --release --locked
+      - run: cargo generate-rpm
       - uses: actions/upload-artifact@v4
         with:
           name: rpm
           path: target/generate-rpm/*.rpm
 
   publish:
+    # Publishing only makes sense for a real tag.
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [deb, rpm]
     runs-on: ubuntu-24.04
     permissions:
@@ -56,14 +97,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Write checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Notes come from RELEASE_NOTES.md when the tagged commit carries one,
-          # otherwise from the tag message.
-          if [ -f RELEASE_NOTES.md ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          # Notes come from the newest section of CHANGELOG.md, otherwise from
+          # the tag message.
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if grep -q '[^[:space:]]' notes.md; then
+            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
           else
             gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
           fi
