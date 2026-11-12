@@ -70,6 +70,9 @@ pub struct AppCtx {
     toasts: RefCell<Vec<String>>,
     save_pending: Cell<bool>,
     opening: Cell<bool>,
+    /// Set from the moment a paste or insert takes the clipboard until its
+    /// keys are typed.
+    pasting: Cell<bool>,
     shown_since: Cell<Option<Instant>>,
 }
 
@@ -266,6 +269,7 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
         toasts: RefCell::new(toasts),
         save_pending: Cell::new(false),
         opening: Cell::new(false),
+        pasting: Cell::new(false),
         shown_since: Cell::new(None),
     });
     ctx.window.attach(&ctx);
@@ -646,6 +650,11 @@ async fn toggle_popup(ctx: &Rc<AppCtx>) {
 /// Opens the popup: detect where a paste would go first (while the target
 /// still has focus), then show the window.
 pub async fn open_popup(ctx: &Rc<AppCtx>) {
+    // Shown now, the popup would take focus and receive the pending paste.
+    if ctx.pasting.get() {
+        log::info!("popup not opened: a paste is still being typed");
+        return;
+    }
     if ctx.opening.replace(true) {
         return;
     }

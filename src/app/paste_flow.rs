@@ -4,6 +4,7 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::capture::Captured;
@@ -39,6 +40,61 @@ pub fn holder_after_skip(current: ClipboardHolder, reason: SkipReason) -> Clipbo
 /// before and is still in history.
 pub fn restore_choice(previous: ClipboardHolder, existing: &[ItemId]) -> Option<ItemId> {
     previous.filter(|id| existing.contains(id))
+}
+
+/// Marks a paste or insert as running for as long as it is alive, so a second
+/// one cannot replace the clipboard or the target before the first has typed.
+struct PasteGuard<'a>(&'a Cell<bool>);
+
+impl<'a> PasteGuard<'a> {
+    /// `None` while another paste is running.
+    fn start(flag: &'a Cell<bool>) -> Option<Self> {
+        (!flag.replace(true)).then_some(Self(flag))
+    }
+}
+
+impl Drop for PasteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// Why the paste keys were not typed after the popup hid.
+#[derive(Debug, PartialEq, Eq)]
+enum Untyped {
+    /// The popup is showing again and would receive the keys itself.
+    PopupShown,
+    /// Something else was copied meanwhile; typing would paste that instead.
+    ClipboardChanged,
+}
+
+fn ready_to_type(popup_visible: bool, clipboard_ours: bool) -> Result<(), Untyped> {
+    if popup_visible {
+        Err(Untyped::PopupShown)
+    } else if !clipboard_ours {
+        Err(Untyped::ClipboardChanged)
+    } else {
+        Ok(())
+    }
+}
+
+/// Checks `ready_to_type` against the live window and clipboard, logging
+/// and telling the user when nothing will be typed.
+fn may_type(ctx: &AppCtx, provider: &gdk::ContentProvider) -> bool {
+    let clipboard = ctx.window.window.clipboard();
+    let ours = clipboard.content().as_ref() == Some(provider);
+    match ready_to_type(ctx.window.is_visible(), ours) {
+        Ok(()) => true,
+        Err(Untyped::PopupShown) => {
+            log::info!("popup reopened before the paste; nothing typed");
+            false
+        }
+        Err(Untyped::ClipboardChanged) => {
+            log::info!("clipboard changed before the paste; nothing typed");
+            ctx.notify_now_or_later("Not pasted: something else was copied first");
+            false
+        }
+    }
 }
 
 /// What to put on the clipboard, with the fingerprint the watcher will see.
@@ -113,6 +169,10 @@ fn prepare(ctx: &AppCtx, id: ItemId) -> Result<Prepared, String> {
 /// Sets the clipboard, hides the popup, and types the paste shortcut for the
 /// target seen when the popup opened.
 pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
+    let Some(_guard) = PasteGuard::start(&ctx.pasting) else {
+        log::info!("paste ignored: another one is still running");
+        return;
+    };
     let started = std::time::Instant::now();
     let prepared = match prepare(ctx, id) {
         Ok(p) => p,
@@ -133,6 +193,9 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
     ctx.clipboard_holder.set(Some(id));
 
     hide_and_wait_for_target(ctx).await;
+    if !may_type(ctx, &prepared.provider) {
+        return;
+    }
 
     let combo = combo_for(ctx.target.get(), mode == PasteMode::ForceTerminal);
     let sent = send_or_recreate(&mut ctx.keys.borrow_mut(), combo, || {
@@ -212,6 +275,10 @@ const RESTORE_DELAY: std::time::Duration = std::time::Duration::from_millis(400)
 /// Types a single emoji or symbol into the target without it becoming a
 /// history entry, then puts the previous clipboard item back.
 pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
+    let Some(guard) = PasteGuard::start(&ctx.pasting) else {
+        log::info!("insert ignored: a paste is still running");
+        return;
+    };
     let clipboard = ctx.window.window.clipboard();
     let previous = ctx.clipboard_holder.get();
     let captured = Captured::Text {
@@ -227,11 +294,16 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
     ctx.clipboard_holder.set(None);
 
     hide_and_wait_for_target(ctx).await;
+    if !may_type(ctx, &provider) {
+        return;
+    }
 
     let combo = combo_for(ctx.target.get(), false);
     let sent = send_or_recreate(&mut ctx.keys.borrow_mut(), combo, || {
         super::make_key_sender(ctx.is_x11)
     });
+    // The keys are out; the popup may open again while the glyph is read.
+    drop(guard);
     if let Err(e) = sent {
         log::warn!("insert failed: {e}");
         ctx.show_toast_now(&not_typed_message(ctx.is_x11));
@@ -343,6 +415,25 @@ mod tests {
             assert_eq!(holder_after_skip(Some(3), r), None);
         }
         assert_eq!(holder_after_skip(None, SkipReason::Echo), None);
+    }
+
+    #[test]
+    fn only_one_paste_runs_at_a_time() {
+        let flag = Cell::new(false);
+        let first = PasteGuard::start(&flag);
+        assert!(first.is_some());
+        assert!(PasteGuard::start(&flag).is_none());
+        drop(first);
+        assert!(!flag.get());
+        assert!(PasteGuard::start(&flag).is_some());
+    }
+
+    #[test]
+    fn keys_are_typed_only_into_the_target_with_our_content() {
+        assert_eq!(ready_to_type(false, true), Ok(()));
+        assert_eq!(ready_to_type(true, true), Err(Untyped::PopupShown));
+        assert_eq!(ready_to_type(true, false), Err(Untyped::PopupShown));
+        assert_eq!(ready_to_type(false, false), Err(Untyped::ClipboardChanged));
     }
 
     #[test]
