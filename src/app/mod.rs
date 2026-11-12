@@ -200,6 +200,7 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
     if let Err(e) = crate::logging::init_logging(&data.join("logs"), log::LevelFilter::Info) {
         eprintln!("tuck: logging disabled: {e}");
     }
+    crate::logging::install_panic_hook();
     let (settings, settings_backup) = Settings::load_checked(&config_path);
     let (store, report) = HistoryStore::open(&data, settings.max_items);
 

@@ -149,6 +149,35 @@ pub fn init_logging(dir: &Path, level: LevelFilter) -> Result<(), String> {
     Ok(())
 }
 
+/// Longest panic message written to the log.
+const PANIC_MESSAGE_MAX: usize = 200;
+
+/// The text of a panic payload, cut short. Panics come from Tuck's own checks
+/// and library errors, never from formatting clipboard data.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-text panic".to_string());
+    text.chars().take(PANIC_MESSAGE_MAX).collect()
+}
+
+/// Writes the location and message of any panic to the log, then runs the
+/// default handler so the usual report still reaches the terminal.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let place = info.location().map_or_else(
+            || "unknown".to_string(),
+            |l| format!("{}:{}", l.file(), l.line()),
+        );
+        log::error!("panic at {place}: {}", panic_text(info.payload()));
+        log::logger().flush();
+        default(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +190,14 @@ mod tests {
                 .target("tuck::test")
                 .build(),
         );
+    }
+
+    #[test]
+    fn panic_text_covers_both_payload_kinds_and_truncates() {
+        assert_eq!(panic_text(&"plain"), "plain");
+        assert_eq!(panic_text(&String::from("owned")), "owned");
+        assert_eq!(panic_text(&42_u8), "non-text panic");
+        assert_eq!(panic_text(&"x".repeat(500)).len(), PANIC_MESSAGE_MAX);
     }
 
     #[test]
