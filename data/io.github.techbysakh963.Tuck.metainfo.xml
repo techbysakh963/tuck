@@ -24,6 +24,7 @@
   <launchable type="desktop-id">io.github.techbysakh963.Tuck.desktop</launchable>
   <url type="homepage">https://github.com/techbysakh963/tuck</url>
   <url type="bugtracker">https://github.com/techbysakh963/tuck/issues</url>
+  <url type="vcs-browser">https://github.com/techbysakh963/tuck</url>
   <developer id="io.github.techbysakh963">
     <name>Tuck contributors</name>
   </developer>
@@ -45,6 +46,10 @@
     <control>keyboard</control>
     <control>pointing</control>
   </supports>
+  <branding>
+    <color type="primary" scheme_preference="light">#d8e4f8</color>
+    <color type="primary" scheme_preference="dark">#2a3a5a</color>
+  </branding>
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.1.0" date="2026-11-12">
