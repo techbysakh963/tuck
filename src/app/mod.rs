@@ -143,10 +143,17 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
     if let Err(e) = crate::logging::init_logging(&data.join("logs"), log::LevelFilter::Info) {
         eprintln!("tuck: logging disabled: {e}");
     }
-    let settings = Settings::load(&config_path);
+    let (settings, settings_backup) = Settings::load_checked(&config_path);
     let (store, report) = HistoryStore::open(&data, settings.max_items);
 
     let mut toasts = Vec::new();
+    if let Some(path) = settings_backup {
+        log::warn!("settings were unreadable, moved to {}", path.display());
+        toasts.push(format!(
+            "Settings could not be read and were reset. The old file was kept as {}.",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
     if let Some(path) = report.recovered_from_corrupt {
         log::warn!("history was unreadable, moved to {}", path.display());
         toasts.push("History could not be read and was reset. The old file was kept.".to_string());
