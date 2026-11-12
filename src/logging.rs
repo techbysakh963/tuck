@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,9 +30,13 @@ pub struct FileLogger {
 
 impl FileLogger {
     pub fn new(dir: &Path, max_bytes: u64, level: LevelFilter) -> std::io::Result<Self> {
-        fs::create_dir_all(dir)?;
+        crate::private::create_dir(dir)?;
         let path = dir.join(LOG_FILE);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)?;
         let written = file.metadata()?.len();
         Ok(Self {
             state: Mutex::new(State {
@@ -67,6 +72,7 @@ impl State {
             .create(true)
             .write(true)
             .truncate(true)
+            .mode(0o600)
             .open(&self.path)
         {
             self.file = file;
