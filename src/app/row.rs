@@ -60,6 +60,7 @@ pub fn build_row(item: &ClipItem, now_ms: i64) -> adw::ActionRow {
         ClipContent::Files { .. } => {
             let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
             icon.add_css_class("dim-label");
+            icon.update_property(&[gtk::accessible::Property::Label("Files")]);
             row.add_prefix(&icon);
         }
         ClipContent::Image { thumb_png, .. } => {
@@ -72,6 +73,7 @@ pub fn build_row(item: &ClipItem, now_ms: i64) -> adw::ActionRow {
     if item.pinned {
         let pin = gtk::Image::from_icon_name("view-pin-symbolic");
         pin.add_css_class("dim-label");
+        pin.update_property(&[gtk::accessible::Property::Label("Pinned")]);
         row.add_suffix(&pin);
     }
     row
@@ -85,6 +87,7 @@ fn colour_swatch(value: &str) -> Option<gtk::DrawingArea> {
         .content_height(LEADING_SIZE / 2)
         .valign(gtk::Align::Center)
         .build();
+    area.update_property(&[gtk::accessible::Property::Label(&format!("Colour {value}"))]);
     area.set_draw_func(move |_, cr, w, h| {
         let (w, h) = (f64::from(w), f64::from(h));
         let r = 6.0_f64.min(h / 2.0);
@@ -125,5 +128,6 @@ fn thumbnail(png: &[u8]) -> Option<gtk::Picture> {
     picture.set_can_shrink(true);
     picture.set_size_request(LEADING_SIZE, LEADING_SIZE);
     picture.set_valign(gtk::Align::Center);
+    picture.update_property(&[gtk::accessible::Property::Label("Image preview")]);
     Some(picture)
 }

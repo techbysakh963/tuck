@@ -330,6 +330,13 @@ impl ClipboardPage {
                 };
                 other.unselect_all();
                 list.select_row(Some(&row));
+                // Focus stays in the search entry, so tell assistive technology
+                // which row the arrow keys are on.
+                if let Some(ctx) = self.ctx() {
+                    ctx.window.search.update_relation(&[
+                        gtk::accessible::Relation::ActiveDescendant(row.upcast_ref()),
+                    ]);
+                }
                 if scroll {
                     self.scroll_to(&row);
                 }
@@ -337,6 +344,11 @@ impl ClipboardPage {
             None => {
                 self.pinned_list.unselect_all();
                 self.recent_list.unselect_all();
+                if let Some(ctx) = self.ctx() {
+                    ctx.window
+                        .search
+                        .reset_relation(gtk::AccessibleRelation::ActiveDescendant);
+                }
             }
         }
     }
