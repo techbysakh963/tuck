@@ -560,6 +560,15 @@ fn install_actions(ctx: &Rc<AppCtx>) {
             tray.set_paused(now_paused);
         }
     });
+    let c = ctx.clone();
+    pause.connect_state_notify(move |action| {
+        let paused = action
+            .state()
+            .and_then(|s| s.get::<bool>())
+            .unwrap_or(false);
+        c.window.clipboard.set_paused(paused);
+    });
+    ctx.window.clipboard.set_paused(paused);
     app.add_action(&pause);
 
     let clear = gio::SimpleAction::new("clear", None);

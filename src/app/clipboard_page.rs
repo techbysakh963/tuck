@@ -82,6 +82,7 @@ pub struct ClipboardPage {
     recent_heading: gtk::Label,
     recent_list: gtk::ListBox,
     empty: adw::StatusPage,
+    banner: adw::Banner,
     state: RefCell<State>,
     ctx: RefCell<Weak<AppCtx>>,
 }
@@ -146,7 +147,12 @@ impl ClipboardPage {
         footer.append(&clear);
         footer.append(&hint);
 
+        let banner = adw::Banner::new("Recording is paused");
+        banner.set_button_label(Some("Resume"));
+        banner.set_action_name(Some("app.pause"));
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&banner);
         root.append(&scroller);
         root.append(&footer);
 
@@ -159,6 +165,7 @@ impl ClipboardPage {
             recent_heading,
             recent_list,
             empty,
+            banner,
             state: RefCell::new(State::default()),
             ctx: RefCell::new(Weak::new()),
         })
@@ -205,6 +212,16 @@ impl ClipboardPage {
                 }
             });
         }
+    }
+
+    /// Shows or hides the notice that nothing new is being recorded.
+    pub fn set_paused(&self, paused: bool) {
+        self.banner.set_revealed(paused);
+        self.empty.set_description(if paused {
+            Some("Recording is paused, so new copies are not saved. Use Resume above to continue.")
+        } else {
+            None
+        });
     }
 
     fn ctx(&self) -> Option<Rc<AppCtx>> {
