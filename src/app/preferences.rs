@@ -12,7 +12,7 @@ use crate::privacy::PrivacyFilter;
 use crate::settings::ShortcutChoice;
 use crate::shortcut;
 
-use super::first_run::{apply_choice, MANUAL_SHORTCUT_TEXT};
+use super::first_run::{apply_choice, MANUAL_SHORTCUT_TEXT, TOGGLE_COMMAND};
 use super::{prune_by_age, schedule_save, AppCtx};
 
 const AUTO_CLEAR_CHOICES: [(&str, Option<u32>); 4] = [
@@ -199,6 +199,19 @@ fn keyboard_group(ctx: &Rc<AppCtx>) -> adw::PreferencesGroup {
         .title("Shortcut to open Tuck")
         .subtitle(shortcut_subtitle(ctx))
         .build();
+
+    if !shortcut::gnome_supported() {
+        let copy = gtk::Button::with_label("Copy command");
+        copy.set_valign(gtk::Align::Center);
+        let c = ctx.clone();
+        copy.connect_clicked(move |_| {
+            c.window.window.clipboard().set_text(TOGGLE_COMMAND);
+            c.window.add_toast("Command copied");
+        });
+        row.add_suffix(&copy);
+        group.add(&row);
+        return group;
+    }
 
     let change = gtk::Button::with_label("Change");
     change.set_valign(gtk::Align::Center);
