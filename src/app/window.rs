@@ -30,6 +30,7 @@ pub struct PopupWindow {
     pub search: gtk::SearchEntry,
     stack: gtk::Stack,
     menu_button: gtk::MenuButton,
+    tab_buttons: Vec<gtk::ToggleButton>,
     overlay: adw::ToastOverlay,
 }
 
@@ -63,6 +64,46 @@ fn route_query(
 /// menu) is in front; otherwise Enter, Delete and Esc belong to that.
 fn popup_keys_apply(dialog_open: bool, menu_open: bool) -> bool {
     !dialog_open && !menu_open
+}
+
+fn tab_title(page: &str) -> &'static str {
+    match page {
+        PAGE_EMOJI => "Emoji",
+        PAGE_SYMBOLS => "Symbols",
+        _ => "Clipboard",
+    }
+}
+
+/// The tab a shortcut switches to: Ctrl+Tab and Ctrl+Shift+Tab cycle,
+/// Alt+1..3 pick one. `None` when the key is not a tab shortcut.
+fn tab_for_key(
+    key: gtk::gdk::Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    current: usize,
+    count: usize,
+) -> Option<usize> {
+    use gtk::gdk::Key;
+    if count == 0 {
+        return None;
+    }
+    if ctrl && !alt && key == Key::Tab && !shift {
+        return Some((current + 1) % count);
+    }
+    if ctrl && !alt && (key == Key::ISO_Left_Tab || (key == Key::Tab && shift)) {
+        return Some((current + count - 1) % count);
+    }
+    if alt && !ctrl && !shift {
+        let n = match key {
+            Key::_1 | Key::KP_1 => 0,
+            Key::_2 | Key::KP_2 => 1,
+            Key::_3 | Key::KP_3 => 2,
+            _ => return None,
+        };
+        return (n < count).then_some(n);
+    }
+    None
 }
 
 fn menu() -> gio::Menu {
@@ -102,6 +143,11 @@ impl PopupWindow {
             (tab("insert-text-symbolic", "Symbols"), PAGE_SYMBOLS),
         ];
         for (i, (button, name)) in pages.iter().enumerate() {
+            button.set_tooltip_text(Some(&format!(
+                "{} (Alt+{}, Ctrl+Tab for the next)",
+                tab_title(name),
+                i + 1
+            )));
             if i > 0 {
                 button.set_group(Some(&pages[0].0));
             }
@@ -197,6 +243,7 @@ impl PopupWindow {
             search,
             stack,
             menu_button,
+            tab_buttons: pages.iter().map(|(b, _)| b.clone()).collect(),
             overlay,
         }
     }
@@ -243,6 +290,16 @@ impl PopupWindow {
         }
         let ctrl = state.contains(ModifierType::CONTROL_MASK);
         let shift = state.contains(ModifierType::SHIFT_MASK);
+        let alt = state.contains(ModifierType::ALT_MASK);
+        let current = self
+            .tab_buttons
+            .iter()
+            .position(|b| b.is_active())
+            .unwrap_or(0);
+        if let Some(next) = tab_for_key(key, ctrl, shift, alt, current, self.tab_buttons.len()) {
+            self.tab_buttons[next].set_active(true);
+            return true;
+        }
         if key == Key::Escape {
             self.window.set_visible(false);
             return true;
@@ -320,6 +377,21 @@ impl PopupWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_shortcuts() {
+        use gtk::gdk::Key;
+        assert_eq!(tab_for_key(Key::Tab, true, false, false, 0, 3), Some(1));
+        assert_eq!(tab_for_key(Key::Tab, true, false, false, 2, 3), Some(0));
+        assert_eq!(
+            tab_for_key(Key::ISO_Left_Tab, true, true, false, 0, 3),
+            Some(2)
+        );
+        assert_eq!(tab_for_key(Key::_3, false, false, true, 0, 3), Some(2));
+        assert_eq!(tab_for_key(Key::_4, false, false, true, 0, 3), None);
+        assert_eq!(tab_for_key(Key::_1, false, false, false, 1, 3), None);
+        assert_eq!(tab_for_key(Key::Tab, false, false, false, 1, 3), None);
+    }
 
     #[test]
     fn popup_keys_stand_aside_for_dialogs_and_menu() {
