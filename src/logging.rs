@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +37,8 @@ impl FileLogger {
             .append(true)
             .mode(0o600)
             .open(&path)?;
+        // `mode` only applies to newly created files; tighten an older log.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let written = file.metadata()?.len();
         Ok(Self {
             state: Mutex::new(State {
@@ -174,6 +176,17 @@ mod tests {
         assert!(backup.len() <= 1200, "backup is {} bytes", backup.len());
         assert!(active.contains("record number 499"));
         assert!(!tmp.path().join("tuck.log.2").exists());
+    }
+
+    #[test]
+    fn existing_log_file_is_tightened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(LOG_FILE);
+        fs::write(&path, b"old\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let _logger = FileLogger::new(tmp.path(), MAX_LOG_BYTES, LevelFilter::Info).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
