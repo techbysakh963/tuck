@@ -135,14 +135,12 @@ pub(crate) fn text_mime(offered: &[String]) -> Option<&'static str> {
         .find(|m| offered.iter().any(|o| o == m))
 }
 
-/// Decides which flavour to read: an image beats everything, then a file
-/// copy, then rich text (with its plain companion), then plain text.
+/// Decides which flavour to read: a file copy, then rich text (with its plain
+/// companion), then plain text. An image wins only when no text is offered:
+/// spreadsheets offer a picture next to the cell text, which is the better copy.
 pub fn choose_target(offered: &[String]) -> Option<Preferred> {
     let has = |m: &str| offered.iter().any(|o| o == m);
     let has_text = text_mime(offered).is_some();
-    if has("image/png") {
-        return Some(Preferred::Png);
-    }
     // File managers also offer the path as text; the marker tells a file copy
     // apart from an application that merely offers a link next to its text.
     let file_copy = has("x-special/gnome-copied-files");
@@ -152,7 +150,10 @@ pub fn choose_target(offered: &[String]) -> Option<Preferred> {
     if has("text/html") && has_text {
         return Some(Preferred::Html);
     }
-    has_text.then_some(Preferred::Utf8Text)
+    if has_text {
+        return Some(Preferred::Utf8Text);
+    }
+    has("image/png").then_some(Preferred::Png)
 }
 
 /// Reads the chosen flavour through `read` (mime type -> bytes) and builds the
@@ -287,6 +288,20 @@ mod tests {
         assert_eq!(
             choose_target(&v(&["image/png", "image/bmp"])),
             Some(Preferred::Png)
+        );
+        // Browser "Copy image": png with html but no plain text stays an image.
+        assert_eq!(
+            choose_target(&v(&["image/png", "text/html"])),
+            Some(Preferred::Png)
+        );
+        // Spreadsheet cell: text wins over the picture, html rides along.
+        assert_eq!(
+            choose_target(&v(&["image/png", "text/html", "text/plain;charset=utf-8"])),
+            Some(Preferred::Html)
+        );
+        assert_eq!(
+            choose_target(&v(&["image/png", "UTF8_STRING"])),
+            Some(Preferred::Utf8Text)
         );
         // File manager copy, with a text fallback.
         let nautilus = v(&[
