@@ -10,7 +10,7 @@ use crate::capture::Captured;
 use crate::echo::fingerprint;
 use crate::ingest::SkipReason;
 use crate::model::{ClipContent, ItemId};
-use crate::paste::{Combo, KeySender};
+use crate::paste::{v_key_from_entries, Combo, KeySender};
 use crate::target::combo_for;
 
 use super::{hide_and_wait_for_target, now_ms, schedule_save, AppCtx};
@@ -156,6 +156,19 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
     );
 }
 
+/// The input code of the "v" key in the active layout.
+fn current_v_key() -> u16 {
+    let entries: Vec<(u32, i32, i32)> = gdk::Display::default()
+        .and_then(|d| d.map_keyval(gdk::Key::v))
+        .map(|keys| {
+            keys.iter()
+                .map(|k| (k.keycode(), k.group(), k.level()))
+                .collect()
+        })
+        .unwrap_or_default();
+    v_key_from_entries(&entries)
+}
+
 /// Sends the combo; when that fails, builds a fresh sender once (access may
 /// have been granted since startup) and retries with it.
 fn send_or_recreate(
@@ -163,11 +176,14 @@ fn send_or_recreate(
     combo: Combo,
     recreate: impl FnOnce() -> Result<Box<dyn KeySender>, String>,
 ) -> Result<(), String> {
+    let v_key = current_v_key();
+    keys.set_paste_key(v_key);
     let first = match keys.send(combo) {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
     let mut fresh = recreate().map_err(|e| format!("{first}; {e}"))?;
+    fresh.set_paste_key(v_key);
     fresh.send(combo)?;
     *keys = fresh;
     Ok(())

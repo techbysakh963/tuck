@@ -8,13 +8,16 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::thread::sleep;
 use std::time::Duration;
 
-use super::{key_events, Combo, KeySender, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V};
+use super::{key_events, Combo, KeySender, KEY_V};
 
 const UI_SET_EVBIT: libc::c_ulong = 0x4004_5564;
 const UI_SET_KEYBIT: libc::c_ulong = 0x4004_5565;
 const UI_DEV_SETUP: libc::c_ulong = 0x405c_5503;
 const UI_DEV_CREATE: libc::c_ulong = 0x5501;
 const UI_DEV_DESTROY: libc::c_ulong = 0x5502;
+
+/// Highest input code enabled on the device.
+const MAX_KEY: u16 = 255;
 
 const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
@@ -40,6 +43,7 @@ struct UinputSetup {
 /// Virtual keyboard created once and kept for the life of the process.
 pub struct UinputKeyboard {
     file: File,
+    v_key: u16,
 }
 
 impl UinputKeyboard {
@@ -63,7 +67,8 @@ impl UinputKeyboard {
             }
         };
         ioctl(UI_SET_EVBIT, EV_KEY as libc::c_int, "event bit")?;
-        for key in [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V] {
+        // Every regular key, because the one that types "v" depends on the layout.
+        for key in 1..=MAX_KEY {
             ioctl(UI_SET_KEYBIT, key as libc::c_int, "key bit")?;
         }
 
@@ -91,7 +96,7 @@ impl UinputKeyboard {
             ));
         }
         sleep(SETTLE);
-        Ok(Self { file })
+        Ok(Self { file, v_key: KEY_V })
     }
 
     fn emit(&mut self, type_: u16, code: u16, value: i32) -> Result<(), String> {
@@ -119,8 +124,12 @@ impl UinputKeyboard {
 }
 
 impl KeySender for UinputKeyboard {
+    fn set_paste_key(&mut self, linux_code: u16) {
+        self.v_key = linux_code;
+    }
+
     fn send(&mut self, c: Combo) -> Result<(), String> {
-        let events = key_events(c);
+        let events = key_events(c, self.v_key);
         let last = events.len() - 1;
         for (i, (key, down)) in events.into_iter().enumerate() {
             self.emit(EV_KEY, key, i32::from(down))?;

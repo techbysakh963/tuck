@@ -8,7 +8,7 @@ use x11rb::protocol::xproto::{KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use super::{key_events, Combo, KeySender};
+use super::{key_events, Combo, KeySender, KEY_V};
 
 /// Offset between Linux input codes and X11 keycodes on evdev keymaps.
 const EVDEV_OFFSET: u16 = 8;
@@ -18,6 +18,7 @@ const KEY_GAP: Duration = Duration::from_millis(8);
 pub struct XTestSender {
     conn: RustConnection,
     root: u32,
+    v_key: u16,
 }
 
 impl XTestSender {
@@ -29,13 +30,21 @@ impl XTestSender {
             .map_err(|e| e.to_string())?
             .reply()
             .map_err(|e| format!("XTEST unavailable: {e}"))?;
-        Ok(Self { conn, root })
+        Ok(Self {
+            conn,
+            root,
+            v_key: KEY_V,
+        })
     }
 }
 
 impl KeySender for XTestSender {
+    fn set_paste_key(&mut self, linux_code: u16) {
+        self.v_key = linux_code;
+    }
+
     fn send(&mut self, c: Combo) -> Result<(), String> {
-        let events = key_events(c);
+        let events = key_events(c, self.v_key);
         let last = events.len() - 1;
         for (i, (key, down)) in events.into_iter().enumerate() {
             let kind = if down {
