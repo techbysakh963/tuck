@@ -74,7 +74,14 @@ fn read_pipe(
         };
         // SAFETY: one valid pollfd that lives for the call.
         let n = unsafe { libc::poll(&mut pfd, 1, wait.as_millis() as i32) };
-        if n <= 0 {
+        if n < 0 {
+            // A signal interrupting the wait is not a failed read.
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if n == 0 {
             return None;
         }
         match reader.read(&mut buf) {
