@@ -50,6 +50,10 @@ pub struct AppCtx {
     pub echo: Rc<RefCell<EchoGuard>>,
     pub keys: Rc<RefCell<Box<dyn KeySender>>>,
     pub target: Cell<TargetKind>,
+    /// The history item the clipboard holds, when known.
+    pub clipboard_holder: Cell<paste_flow::ClipboardHolder>,
+    /// Counts clipboard events, so a slow image capture can tell it is stale.
+    capture_seq: Cell<u64>,
     pub window: PopupWindow,
     pub app: adw::Application,
     pub filter: RefCell<PrivacyFilter>,
@@ -203,6 +207,8 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
         echo: Rc::new(RefCell::new(EchoGuard::new())),
         keys: Rc::new(RefCell::new(keys)),
         target: Cell::new(TargetKind::Unknown),
+        clipboard_holder: Cell::new(None),
+        capture_seq: Cell::new(0),
         window,
         app: app.clone(),
         filter: RefCell::new(filter),
@@ -274,6 +280,8 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     prune_by_age(ctx);
     let paused = ctx.settings.borrow().paused;
     let now = now_ms();
+    let seq = ctx.capture_seq.get() + 1;
+    ctx.capture_seq.set(seq);
     // The echo guard and privacy rules run here, in arrival order, whatever happens next.
     let skipped = precheck(
         &event,
@@ -284,8 +292,14 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     );
     if let Some(reason) = skipped {
         log::debug!("capture skipped: {reason:?}");
+        ctx.clipboard_holder.set(paste_flow::holder_after_skip(
+            ctx.clipboard_holder.get(),
+            reason,
+        ));
         return;
     }
+    // Until the new content is stored (or fails to be) the old holder is stale.
+    ctx.clipboard_holder.set(None);
     match event.captured {
         // Decoding, scaling and writing an image can take long enough to stall the UI.
         Captured::Image { png } => {
@@ -298,7 +312,7 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
                 match prepared {
                     Ok(Ok(prepared)) => {
                         log::debug!("image prepared in {} ms", started.elapsed().as_millis());
-                        add_prepared(&ctx, prepared, source, now);
+                        add_prepared(&ctx, prepared, source, now, seq);
                     }
                     Ok(Err(e)) => log::warn!("capture failed: {e}"),
                     Err(_) => log::error!("image worker panicked"),
@@ -309,7 +323,10 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
             let event = CaptureEvent { captured, ..event };
             let result = store_event(event, &mut ctx.store.borrow_mut(), now);
             match result {
-                Ok(IngestResult::Stored(_)) => stored(ctx),
+                Ok(IngestResult::Stored(outcome)) => {
+                    ctx.clipboard_holder.set(Some(outcome.id()));
+                    stored(ctx);
+                }
                 Ok(IngestResult::Skipped(reason)) => {
                     log::debug!("capture skipped: {reason:?}")
                 }
@@ -319,10 +336,21 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     }
 }
 
-fn add_prepared(ctx: &Rc<AppCtx>, prepared: PreparedImage, source: Option<String>, now: i64) {
-    ctx.store
+fn add_prepared(
+    ctx: &Rc<AppCtx>,
+    prepared: PreparedImage,
+    source: Option<String>,
+    now: i64,
+    seq: u64,
+) {
+    let outcome = ctx
+        .store
         .borrow_mut()
         .add_prepared_image(prepared, source, now);
+    // Only the newest capture can be what the clipboard holds now.
+    if ctx.capture_seq.get() == seq {
+        ctx.clipboard_holder.set(Some(outcome.id()));
+    }
     stored(ctx);
 }
 

@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use crate::capture::Captured;
 use crate::echo::fingerprint;
+use crate::ingest::SkipReason;
 use crate::model::{ClipContent, ItemId};
 use crate::target::combo_for;
 
@@ -17,6 +18,26 @@ use super::{hide_and_wait_for_target, now_ms, schedule_save, AppCtx};
 pub enum PasteMode {
     Normal,
     ForceTerminal,
+}
+
+/// Which history item the clipboard holds right now; `None` when it is
+/// unknown (a copy Tuck skipped, or something from before Tuck started).
+pub type ClipboardHolder = Option<ItemId>;
+
+/// The holder after a capture was skipped. Our own paste echoing back changes
+/// nothing; any other skipped copy replaced the clipboard with something that
+/// is not in history.
+pub fn holder_after_skip(current: ClipboardHolder, reason: SkipReason) -> ClipboardHolder {
+    match reason {
+        SkipReason::Echo => current,
+        _ => None,
+    }
+}
+
+/// The item to put back after an insert: only one that was on the clipboard
+/// before and is still in history.
+pub fn restore_choice(previous: ClipboardHolder, existing: &[ItemId]) -> Option<ItemId> {
+    previous.filter(|id| existing.contains(id))
 }
 
 /// What to put on the clipboard, with the fingerprint the watcher will see.
@@ -88,6 +109,7 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
         fail(ctx, &format!("cannot set the clipboard: {e}"));
         return;
     }
+    ctx.clipboard_holder.set(Some(id));
 
     hide_and_wait_for_target(ctx).await;
 
@@ -99,6 +121,7 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
     }
 
     ctx.store.borrow_mut().touch(id, now_ms());
+    ctx.clipboard_holder.set(Some(id));
     schedule_save(ctx);
     ctx.window.clipboard.refresh(false);
     log::info!(
@@ -120,6 +143,7 @@ const RESTORE_DELAY: std::time::Duration = std::time::Duration::from_millis(400)
 /// history entry, then puts the previous clipboard item back.
 pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
     let clipboard = ctx.window.window.clipboard();
+    let previous = ctx.clipboard_holder.get();
     let captured = Captured::Text {
         text: glyph.to_string(),
         html: None,
@@ -130,6 +154,7 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
         fail(ctx, &format!("cannot set the clipboard: {e}"));
         return;
     }
+    ctx.clipboard_holder.set(None);
 
     hide_and_wait_for_target(ctx).await;
 
@@ -145,27 +170,53 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
         log::info!("clipboard changed during the insert; not restoring");
         return;
     }
-    restore_previous(ctx);
+    restore_previous(ctx, previous);
 }
 
-/// Puts the most recently used history item back on the clipboard, arming the
-/// echo guard so the watcher does not count it as a new copy.
-fn restore_previous(ctx: &AppCtx) {
-    let id = ctx
-        .store
-        .borrow()
-        .items()
-        .iter()
-        .max_by_key(|i| i.used_ms)
-        .map(|i| i.id);
-    let Some(id) = id else { return };
+/// Puts the item that was on the clipboard before the insert back, arming the
+/// echo guard so the watcher does not count it as a new copy. When that item
+/// is unknown the glyph stays: restoring some other item would be wrong.
+fn restore_previous(ctx: &AppCtx, previous: ClipboardHolder) {
+    let ids: Vec<ItemId> = ctx.store.borrow().items().iter().map(|i| i.id).collect();
+    let Some(id) = restore_choice(previous, &ids) else {
+        log::info!("previous clipboard content is not in history; not restoring");
+        return;
+    };
     match prepare(ctx, id) {
         Ok(p) => {
             ctx.echo.borrow_mut().arm(p.fingerprint, now_ms());
             if let Err(e) = ctx.window.window.clipboard().set_content(Some(&p.provider)) {
                 log::warn!("cannot restore the clipboard: {e}");
+            } else {
+                ctx.clipboard_holder.set(Some(id));
             }
         }
         Err(e) => log::warn!("cannot restore the clipboard: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_echo_keeps_the_holder() {
+        assert_eq!(holder_after_skip(Some(3), SkipReason::Echo), Some(3));
+        for r in [
+            SkipReason::Secret,
+            SkipReason::Excluded,
+            SkipReason::Paused,
+            SkipReason::Empty,
+        ] {
+            assert_eq!(holder_after_skip(Some(3), r), None);
+        }
+        assert_eq!(holder_after_skip(None, SkipReason::Echo), None);
+    }
+
+    #[test]
+    fn restore_needs_a_known_item_that_still_exists() {
+        assert_eq!(restore_choice(Some(2), &[1, 2, 3]), Some(2));
+        assert_eq!(restore_choice(Some(9), &[1, 2, 3]), None);
+        assert_eq!(restore_choice(None, &[1, 2, 3]), None);
     }
 }
