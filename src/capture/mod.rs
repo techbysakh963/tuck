@@ -155,6 +155,15 @@ pub(crate) fn read_capture(
     mut read: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> Option<CaptureEvent> {
     let preferred = choose_target(offered)?;
+    // Fail closed: when a password-manager hint is offered, read it before any
+    // content and drop the event if it cannot be read.
+    let secret_hint = match offered
+        .iter()
+        .find(|o| o.eq_ignore_ascii_case(SECRET_HINT_MIME))
+    {
+        Some(name) => Some(String::from_utf8_lossy(&read(name)?).into_owned()),
+        None => None,
+    };
     let captured = match preferred {
         Preferred::Png => Captured::Image {
             png: read("image/png")?,
@@ -177,12 +186,6 @@ pub(crate) fn read_capture(
             Captured::Text { text, html }
         }
     };
-    let secret_hint = offered
-        .iter()
-        .any(|o| o == SECRET_HINT_MIME)
-        .then(|| read(SECRET_HINT_MIME))
-        .flatten()
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
     Some(CaptureEvent {
         captured,
         mime_types: offered.to_vec(),
@@ -320,6 +323,34 @@ mod tests {
             }
         );
         assert_eq!(event.secret_hint.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn read_capture_matches_hint_case_insensitively() {
+        let offered = v(&["text/plain", "x-kde-passwordmanagerhint"]);
+        let event = read_capture(&offered, None, |m| match m {
+            "text/plain" => Some(b"hunter2".to_vec()),
+            "x-kde-passwordmanagerhint" => Some(b"secret".to_vec()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(event.secret_hint.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn read_capture_drops_event_when_offered_hint_is_unreadable() {
+        let offered = v(&["text/plain", "x-kde-passwordManagerHint"]);
+        let mut content_read = false;
+        let event = read_capture(&offered, None, |m| {
+            if m == "text/plain" {
+                content_read = true;
+                Some(b"hunter2".to_vec())
+            } else {
+                None
+            }
+        });
+        assert!(event.is_none());
+        assert!(!content_read, "content must not be read before the hint");
     }
 
     #[test]
