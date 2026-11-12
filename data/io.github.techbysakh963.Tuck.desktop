@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Tuck
+GenericName=Clipboard History
+Comment=Clipboard history, emoji and symbol picker
+Exec=tuck
+Icon=io.github.techbysakh963.Tuck
+Terminal=false
+Categories=Utility;GTK;
+Keywords=clipboard;history;paste;emoji;
+StartupNotify=true
+DBusActivatable=true
+X-GNOME-UsesNotifications=false
+Actions=Preferences;
+
+[Desktop Action Preferences]
+Name=Preferences
+Exec=tuck --preferences

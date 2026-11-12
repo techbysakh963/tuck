@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.techbysakh963.Tuck</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Tuck</name>
+  <summary>Clipboard history, emoji and symbol picker</summary>
+  <description>
+    <p>
+      Tuck keeps a history of what you copy and brings it back with one
+      shortcut. Open the popup, pick an item, and it is pasted straight into the
+      window you were working in, terminals included.
+    </p>
+    <p>
+      The same popup has emoji and symbol pickers. Inserting one never lands in
+      your history, and whatever you had copied before is put back afterwards.
+    </p>
+    <ul>
+      <li>Text, rich text and images, with pinned items and search</li>
+      <li>Skips copies from password managers and anything matching your own patterns</li>
+      <li>Built with GTK 4 and libadwaita, no custom styling</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.techbysakh963.Tuck.desktop</launchable>
+  <url type="homepage">https://github.com/techbysakh963/tuck</url>
+  <url type="bugtracker">https://github.com/techbysakh963/tuck/issues</url>
+  <developer id="io.github.techbysakh963">
+    <name>Tuck contributors</name>
+  </developer>
+  <provides>
+    <binary>tuck</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>clipboard</keyword>
+    <keyword>history</keyword>
+    <keyword>emoji</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-12">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
