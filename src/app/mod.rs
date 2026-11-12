@@ -280,6 +280,9 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
     });
 
     install_actions(&ctx);
+    if !is_x11 {
+        crate::target::a11y::start();
+    }
     start_capture(&ctx);
     handle_tray_commands(app, tray_rx);
     ctx.sync_tray();

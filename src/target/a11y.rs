@@ -2,6 +2,7 @@
 //! see which widget has focus in another window on GNOME Wayland.
 
 use std::collections::VecDeque;
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
 use zbus::OwnedObjectPath;
@@ -41,24 +42,101 @@ pub enum Stage {
     NoActiveWindow,
 }
 
-pub fn detect() -> TargetKind {
-    let started = Instant::now();
-    match find_focused_terminal() {
-        Ok(kind) => {
-            log::info!(
-                "target detection: {kind:?} in {} ms",
-                started.elapsed().as_millis()
-            );
-            kind
+struct Request {
+    reply: mpsc::Sender<Result<TargetKind, Stage>>,
+}
+
+static WORKER: OnceLock<async_channel::Sender<Request>> = OnceLock::new();
+
+/// Starts the thread that owns the accessibility-bus connection. It connects
+/// right away, so the first popup opening only pays for the tree walk, and it
+/// connects again after a failure. Idle, it sleeps on its channel.
+pub fn start() {
+    sender();
+}
+
+fn sender() -> &'static async_channel::Sender<Request> {
+    WORKER.get_or_init(|| {
+        let (tx, rx) = async_channel::unbounded::<Request>();
+        let spawned = std::thread::Builder::new()
+            .name("tuck-a11y".into())
+            .spawn(move || zruntime::block_on(worker(rx)));
+        if let Err(e) = spawned {
+            log::warn!("cannot start the accessibility thread: {e}");
         }
-        Err(stage) => {
-            log::info!(
-                "target detection failed at {stage:?} after {} ms",
-                started.elapsed().as_millis()
-            );
-            TargetKind::Unknown
+        tx
+    })
+}
+
+async fn worker(rx: async_channel::Receiver<Request>) {
+    let Ok(runtime) = SharedRuntime::current() else {
+        return;
+    };
+    let mut conn = connect(&runtime).await;
+    while let Ok(request) = rx.recv().await {
+        let started = Instant::now();
+        if conn.is_none() {
+            conn = connect(&runtime).await;
         }
+        let result = match &conn {
+            Some(c) => {
+                let bus = Bus {
+                    conn: c.clone(),
+                    runtime: runtime.clone(),
+                    deadline: Instant::now() + CALL_BUDGET,
+                };
+                let result = walk(&bus).await;
+                if matches!(result, Err(Stage::OpenBus)) {
+                    // The connection stopped answering; open a new one next time.
+                    conn = None;
+                }
+                result
+            }
+            None => Err(Stage::OpenBus),
+        };
+        log_outcome(&result, started);
+        let _ = request.reply.send(result);
     }
+}
+
+async fn connect(runtime: &SharedRuntime) -> Option<Connection> {
+    let started = Instant::now();
+    let conn = open_bus(runtime).await;
+    log::info!(
+        "accessibility bus {} in {} ms",
+        if conn.is_some() {
+            "connected"
+        } else {
+            "unavailable"
+        },
+        started.elapsed().as_millis()
+    );
+    conn
+}
+
+fn log_outcome(result: &Result<TargetKind, Stage>, started: Instant) {
+    match result {
+        Ok(kind) => log::info!(
+            "target detection: {kind:?} in {} ms",
+            started.elapsed().as_millis()
+        ),
+        Err(stage) => log::info!(
+            "target detection failed at {stage:?} after {} ms",
+            started.elapsed().as_millis()
+        ),
+    }
+}
+
+pub fn detect() -> TargetKind {
+    let (reply, answer) = mpsc::channel();
+    if sender().try_send(Request { reply }).is_err() {
+        return TargetKind::Unknown;
+    }
+    answer
+        .recv()
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(TargetKind::Unknown)
 }
 
 struct Bus {
@@ -148,46 +226,40 @@ async fn open_bus(runtime: &SharedRuntime) -> Option<Connection> {
 /// `Terminal` when a focused terminal widget exists in the active window,
 /// `Other` when an active window was found without one, and the failed stage
 /// when the accessibility bus gave no usable answer.
-fn find_focused_terminal() -> Result<TargetKind, Stage> {
-    zruntime::block_on(async {
-        let runtime = SharedRuntime::current().map_err(|_| Stage::OpenBus)?;
-        let bus = Bus {
-            conn: open_bus(&runtime).await.ok_or(Stage::OpenBus)?,
-            runtime,
-            deadline: Instant::now() + CALL_BUDGET,
-        };
-        let root: ObjectRef = (
-            "org.a11y.atspi.Registry".into(),
-            OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root")
-                .map_err(|_| Stage::OpenBus)?,
-        );
-
-        let mut saw_active_window = false;
-        for app in bus.children(&root).await {
-            // gnome-shell answers slowly and never hosts the paste target.
-            if bus.process_name(&app.0).await.as_deref() == Some("gnome-shell") {
+async fn walk(bus: &Bus) -> Result<TargetKind, Stage> {
+    let root: ObjectRef = (
+        "org.a11y.atspi.Registry".into(),
+        OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root").map_err(|_| Stage::OpenBus)?,
+    );
+    let apps = bus.children(&root).await;
+    if apps.is_empty() {
+        return Err(Stage::OpenBus);
+    }
+    let mut saw_active_window = false;
+    for app in apps {
+        // gnome-shell answers slowly and never hosts the paste target.
+        if bus.process_name(&app.0).await.as_deref() == Some("gnome-shell") {
+            continue;
+        }
+        for frame in bus.children(&app).await {
+            let active = bus
+                .state(&frame)
+                .await
+                .is_some_and(|s| has_state(&s, STATE_ACTIVE));
+            if !active {
                 continue;
             }
-            for frame in bus.children(&app).await {
-                let active = bus
-                    .state(&frame)
-                    .await
-                    .is_some_and(|s| has_state(&s, STATE_ACTIVE));
-                if !active {
-                    continue;
-                }
-                saw_active_window = true;
-                if search_terminal(&bus, frame).await {
-                    return Ok(TargetKind::Terminal);
-                }
+            saw_active_window = true;
+            if search_terminal(bus, frame).await {
+                return Ok(TargetKind::Terminal);
             }
         }
-        if saw_active_window {
-            Ok(TargetKind::Other)
-        } else {
-            Err(Stage::NoActiveWindow)
-        }
-    })
+    }
+    if saw_active_window {
+        Ok(TargetKind::Other)
+    } else {
+        Err(Stage::NoActiveWindow)
+    }
 }
 
 /// Breadth-first search below a window for a focused TERMINAL widget.
