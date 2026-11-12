@@ -123,12 +123,15 @@ fn menu() -> gio::Menu {
 impl PopupWindow {
     pub fn new(app: &adw::Application) -> Self {
         let clipboard = ClipboardPage::new();
-        let emoji = GridPage::new(emoji_entries(), true);
-        let symbols = GridPage::new(symbol_entries().to_vec(), false);
+        let emoji = GridPage::new(emoji_entries, true);
+        let symbols = GridPage::new(|| symbol_entries().to_vec(), false);
         let search = gtk::SearchEntry::new();
 
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
+        // Sized by the page showing, so the unused grids are never measured.
+        stack.set_hhomogeneous(false);
+        stack.set_vhomogeneous(false);
         stack.add_named(&clipboard.root, Some(PAGE_CLIPBOARD));
         stack.add_named(&emoji.root, Some(PAGE_EMOJI));
         stack.add_named(&symbols.root, Some(PAGE_SYMBOLS));
@@ -164,6 +167,11 @@ impl PopupWindow {
                     stack.set_visible_child_name(name);
                     // The search text carries over to the page that opens.
                     route_query(name, search.text().as_str(), &clipboard, &emoji, &symbols);
+                    match name {
+                        PAGE_EMOJI => emoji.ensure_built(),
+                        PAGE_SYMBOLS => symbols.ensure_built(),
+                        _ => {}
+                    }
                     search.grab_focus();
                 }
             });

@@ -1,6 +1,6 @@
 //! A virtualised grid of glyphs, shared by the Emoji and Symbols tabs.
 
-use std::cell::RefCell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::{Rc, Weak};
 
 use gtk4 as gtk;
@@ -23,7 +23,10 @@ pub struct GridPage {
     recent_heading: gtk::Label,
     recent: gtk::FlowBox,
     empty: adw::StatusPage,
-    entries: Rc<Vec<GridEntry>>,
+    entries: Rc<OnceCell<Vec<GridEntry>>>,
+    load_entries: fn() -> Vec<GridEntry>,
+    /// The model is filled the first time the page is shown, not at startup.
+    built: Cell<bool>,
     with_recent: bool,
     query: RefCell<String>,
     ctx: RefCell<Weak<AppCtx>>,
@@ -42,8 +45,8 @@ fn glyph_label() -> gtk::Label {
 }
 
 impl GridPage {
-    pub fn new(entries: Vec<GridEntry>, with_recent: bool) -> Rc<Self> {
-        let entries = Rc::new(entries);
+    pub fn new(load_entries: fn() -> Vec<GridEntry>, with_recent: bool) -> Rc<Self> {
+        let entries: Rc<OnceCell<Vec<GridEntry>>> = Rc::default();
         let model = gtk::StringList::new(&[]);
 
         let factory = gtk::SignalListItemFactory::new();
@@ -64,7 +67,7 @@ impl GridPage {
                 .item()
                 .and_downcast::<gtk::StringObject>()
                 .and_then(|s| s.string().parse::<usize>().ok());
-            if let Some(entry) = index.and_then(|i| table.get(i)) {
+            if let Some(entry) = index.and_then(|i| table.get()?.get(i)) {
                 label.set_text(&entry.glyph);
                 label.set_tooltip_text(Some(&entry.name));
             }
@@ -124,6 +127,8 @@ impl GridPage {
             recent,
             empty,
             entries,
+            load_entries,
+            built: Cell::new(false),
             with_recent,
             query: RefCell::new(String::new()),
             ctx: RefCell::new(Weak::new()),
@@ -140,7 +145,7 @@ impl GridPage {
                 .model
                 .string(position)
                 .and_then(|s| s.parse::<usize>().ok())
-                .and_then(|i| page.entries.get(i))
+                .and_then(|i| page.entries().get(i))
                 .map(|e| e.glyph.clone());
             if let Some(glyph) = glyph {
                 page.insert(&glyph);
@@ -158,7 +163,17 @@ impl GridPage {
                 page.insert(&glyph);
             }
         });
+    }
 
+    fn entries(&self) -> &[GridEntry] {
+        self.entries.get_or_init(self.load_entries)
+    }
+
+    /// Fills the grid on first use; later calls do nothing.
+    pub fn ensure_built(&self) {
+        if self.built.replace(true) {
+            return;
+        }
         self.show_matches();
         self.refresh_recent();
     }
@@ -187,12 +202,14 @@ impl GridPage {
             return;
         }
         *self.query.borrow_mut() = query.to_string();
-        self.show_matches();
-        self.refresh_recent();
+        if self.built.get() {
+            self.show_matches();
+            self.refresh_recent();
+        }
     }
 
     fn show_matches(&self) {
-        let matches = search_entries(&self.entries, &self.query.borrow());
+        let matches = search_entries(self.entries(), &self.query.borrow());
         let strings: Vec<String> = matches.iter().map(usize::to_string).collect();
         let refs: Vec<&str> = strings.iter().map(String::as_str).collect();
         self.model.splice(0, self.model.n_items(), &refs);
@@ -228,7 +245,7 @@ impl GridPage {
     /// Scrolls back to the top and forgets the previous search.
     pub fn reset(&self) {
         self.set_query("");
-        if self.model.n_items() > 0 {
+        if self.built.get() && self.model.n_items() > 0 {
             self.grid
                 .scroll_to(0, gtk::ListScrollFlags::NONE, None::<gtk::ScrollInfo>);
         }
@@ -236,6 +253,7 @@ impl GridPage {
     }
 
     pub fn focus_grid(&self) {
+        self.ensure_built();
         if self.model.n_items() > 0 {
             self.grid
                 .scroll_to(0, gtk::ListScrollFlags::FOCUS, None::<gtk::ScrollInfo>);
@@ -244,6 +262,7 @@ impl GridPage {
 
     /// Enter in the search box inserts the best (first) match.
     pub fn activate_first(&self) {
+        self.ensure_built();
         if self.model.n_items() > 0 {
             self.grid.emit_by_name::<()>("activate", &[&0u32]);
         }
