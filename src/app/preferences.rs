@@ -238,7 +238,8 @@ fn general_group(ctx: &Rc<AppCtx>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("General").build();
     let login = adw::SwitchRow::builder()
         .title("Start at login")
-        .active(ctx.settings.borrow().start_at_login)
+        // The autostart file is the truth; the user may have removed it by hand.
+        .active(crate::autostart::is_enabled())
         .build();
     let c = ctx.clone();
     login.connect_active_notify(move |row| {
