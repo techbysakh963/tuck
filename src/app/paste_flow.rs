@@ -10,6 +10,7 @@ use crate::capture::Captured;
 use crate::echo::fingerprint;
 use crate::ingest::SkipReason;
 use crate::model::{ClipContent, ItemId};
+use crate::paste::{Combo, KeySender};
 use crate::target::combo_for;
 
 use super::{hide_and_wait_for_target, now_ms, schedule_save, AppCtx};
@@ -114,9 +115,14 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
     hide_and_wait_for_target(ctx).await;
 
     let combo = combo_for(ctx.target.get(), mode == PasteMode::ForceTerminal);
-    let sent = ctx.keys.borrow_mut().send(combo);
+    let sent = send_or_recreate(&mut ctx.keys.borrow_mut(), combo, || {
+        super::make_key_sender(ctx.is_x11)
+    });
     if let Err(e) = sent {
-        fail(ctx, &format!("paste failed: {e}"));
+        // The popup is gone and nothing was typed: say so now, not at the
+        // next open.
+        log::warn!("paste failed: {e}");
+        ctx.show_toast_now(&not_typed_message(ctx.is_x11));
         return;
     }
 
@@ -128,6 +134,34 @@ pub async fn paste_item(ctx: &Rc<AppCtx>, id: ItemId, mode: PasteMode) {
         "pasted item with {combo:?} in {} ms",
         started.elapsed().as_millis()
     );
+}
+
+/// Sends the combo; when that fails, builds a fresh sender once (access may
+/// have been granted since startup) and retries with it.
+fn send_or_recreate(
+    keys: &mut Box<dyn KeySender>,
+    combo: Combo,
+    recreate: impl FnOnce() -> Result<Box<dyn KeySender>, String>,
+) -> Result<(), String> {
+    let first = match keys.send(combo) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let mut fresh = recreate().map_err(|e| format!("{first}; {e}"))?;
+    fresh.send(combo)?;
+    *keys = fresh;
+    Ok(())
+}
+
+fn not_typed_message(is_x11: bool) -> String {
+    let why = if is_x11 {
+        "cannot reach the X server"
+    } else {
+        "/dev/uinput is not accessible"
+    };
+    format!(
+        "Copied. Paste with Ctrl+V (Tuck cannot type: {why}). See Troubleshooting in the README."
+    )
 }
 
 fn fail(ctx: &AppCtx, message: &str) {
@@ -159,8 +193,12 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
     hide_and_wait_for_target(ctx).await;
 
     let combo = combo_for(ctx.target.get(), false);
-    if let Err(e) = ctx.keys.borrow_mut().send(combo) {
-        fail(ctx, &format!("insert failed: {e}"));
+    let sent = send_or_recreate(&mut ctx.keys.borrow_mut(), combo, || {
+        super::make_key_sender(ctx.is_x11)
+    });
+    if let Err(e) = sent {
+        log::warn!("insert failed: {e}");
+        ctx.show_toast_now(&not_typed_message(ctx.is_x11));
         return;
     }
 
@@ -198,6 +236,64 @@ fn restore_previous(ctx: &AppCtx, previous: ClipboardHolder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fake {
+        works: bool,
+        sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl KeySender for Fake {
+        fn send(&mut self, _: Combo) -> Result<(), String> {
+            if self.works {
+                self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err("closed".into())
+            }
+        }
+    }
+
+    fn fake(
+        works: bool,
+    ) -> (
+        Box<dyn KeySender>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Box::new(Fake {
+                works,
+                sent: sent.clone(),
+            }),
+            sent,
+        )
+    }
+
+    #[test]
+    fn working_sender_is_not_recreated() {
+        let (mut keys, sent) = fake(true);
+        let r = send_or_recreate(&mut keys, Combo::CtrlV, || panic!("not needed"));
+        assert!(r.is_ok());
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_sender_is_replaced_and_retried() {
+        let (mut keys, _) = fake(false);
+        let (fresh, sent) = fake(true);
+        let r = send_or_recreate(&mut keys, Combo::CtrlV, || Ok(fresh));
+        assert!(r.is_ok());
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The replacement stays in use.
+        assert!(keys.send(Combo::CtrlV).is_ok());
+    }
+
+    #[test]
+    fn failed_recreate_reports_both_errors() {
+        let (mut keys, _) = fake(false);
+        let r = send_or_recreate(&mut keys, Combo::CtrlV, || Err("denied".into()));
+        assert_eq!(r.unwrap_err(), "closed; denied");
+    }
 
     #[test]
     fn only_an_echo_keeps_the_holder() {

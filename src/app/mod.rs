@@ -86,6 +86,13 @@ impl AppCtx {
         }
     }
 
+    /// Shown right away: brings the popup back with the message on it.
+    pub fn show_toast_now(&self, message: &str) {
+        self.window.prepare_to_show();
+        self.window.present();
+        self.window.add_toast(message);
+    }
+
     /// Shown the next time the popup opens (and logged by the caller).
     pub fn queue_toast(&self, message: &str) {
         self.toasts.borrow_mut().push(message.to_string());
@@ -122,6 +129,15 @@ struct UnavailableKeys(String);
 impl KeySender for UnavailableKeys {
     fn send(&mut self, _: Combo) -> Result<(), String> {
         Err(self.0.clone())
+    }
+}
+
+/// Creates the key sender for this session type.
+pub fn make_key_sender(is_x11: bool) -> Result<Box<dyn KeySender>, String> {
+    if is_x11 {
+        Ok(Box::new(XTestSender::connect()?))
+    } else {
+        Ok(Box::new(UinputKeyboard::create()?))
     }
 }
 
@@ -178,23 +194,16 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
     }
 
     let is_x11 = std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty());
-    let keys: Box<dyn KeySender> = if is_x11 {
-        match XTestSender::connect() {
-            Ok(k) => Box::new(k),
-            Err(e) => {
-                log::error!("no paste backend: {e}");
-                toasts.push("Pasting is unavailable: cannot reach the X server".into());
-                Box::new(UnavailableKeys(e))
-            }
-        }
-    } else {
-        match UinputKeyboard::create() {
-            Ok(k) => Box::new(k),
-            Err(e) => {
-                log::error!("no paste backend: {e}");
-                toasts.push("Paste needs access to /dev/uinput (see the README)".into());
-                Box::new(UnavailableKeys(e))
-            }
+    let keys: Box<dyn KeySender> = match make_key_sender(is_x11) {
+        Ok(k) => k,
+        Err(e) => {
+            log::error!("no paste backend: {e}");
+            toasts.push(if is_x11 {
+                "Pasting is unavailable: cannot reach the X server".into()
+            } else {
+                "Paste needs access to /dev/uinput (see the README)".into()
+            });
+            Box::new(UnavailableKeys(e))
         }
     };
 
