@@ -29,6 +29,7 @@ use crate::paste::{Combo, KeySender, UinputKeyboard, XTestSender};
 use crate::privacy::PrivacyFilter;
 use crate::settings::Settings;
 use crate::target::{detect_target, TargetKind};
+use crate::tray::{Tray, TrayCommand};
 use crate::APP_ID;
 
 pub use window::PopupWindow;
@@ -52,6 +53,8 @@ pub struct AppCtx {
     pub filter: RefCell<PrivacyFilter>,
     pub config_path: PathBuf,
     pub is_x11: bool,
+    tray: RefCell<Option<Tray>>,
+    tray_tx: async_channel::Sender<TrayCommand>,
     toasts: RefCell<Vec<String>>,
     save_pending: Cell<bool>,
     opening: Cell<bool>,
@@ -59,6 +62,24 @@ pub struct AppCtx {
 }
 
 impl AppCtx {
+    /// Makes the top-bar icon match the "show icon" setting.
+    pub fn sync_tray(&self) {
+        let (want, paused) = {
+            let s = self.settings.borrow();
+            (s.show_tray_icon, s.paused)
+        };
+        let mut tray = self.tray.borrow_mut();
+        match (want, tray.is_some()) {
+            (true, false) => *tray = Tray::show(self.tray_tx.clone(), paused),
+            (false, true) => {
+                if let Some(t) = tray.take() {
+                    t.remove();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Shown the next time the popup opens (and logged by the caller).
     pub fn queue_toast(&self, message: &str) {
         self.toasts.borrow_mut().push(message.to_string());
@@ -154,6 +175,7 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
 
     let filter = PrivacyFilter::new(&settings.exclusions);
     let window = PopupWindow::new(app);
+    let (tray_tx, tray_rx) = async_channel::unbounded::<TrayCommand>();
     let ctx = Rc::new(AppCtx {
         store: Rc::new(RefCell::new(store)),
         settings: Rc::new(RefCell::new(settings)),
@@ -165,6 +187,8 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
         filter: RefCell::new(filter),
         config_path,
         is_x11,
+        tray: RefCell::new(None),
+        tray_tx,
         toasts: RefCell::new(toasts),
         save_pending: Cell::new(false),
         opening: Cell::new(false),
@@ -183,7 +207,24 @@ fn build_ctx(app: &adw::Application) -> Rc<AppCtx> {
 
     install_actions(&ctx);
     start_capture(&ctx);
+    handle_tray_commands(app, tray_rx);
+    ctx.sync_tray();
     ctx
+}
+
+/// Runs what the top-bar icon asked for, on the main loop.
+fn handle_tray_commands(app: &adw::Application, rx: async_channel::Receiver<TrayCommand>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(command) = rx.recv().await {
+            match command {
+                TrayCommand::Toggle => app.activate_action("toggle", None),
+                TrayCommand::Preferences => app.activate_action("preferences", None),
+                TrayCommand::TogglePause => app.activate_action("pause", None),
+                TrayCommand::Quit => app.activate_action("quit", None),
+            }
+        }
+    });
 }
 
 fn start_capture(ctx: &Rc<AppCtx>) {
@@ -257,10 +298,15 @@ fn install_actions(ctx: &Rc<AppCtx>) {
             .and_then(|s| s.get::<bool>())
             .unwrap_or(false);
         action.set_state(&now_paused.to_variant());
-        let mut settings = c.settings.borrow_mut();
-        settings.paused = now_paused;
-        if let Err(e) = settings.save(&c.config_path) {
-            log::error!("cannot save settings: {e}");
+        {
+            let mut settings = c.settings.borrow_mut();
+            settings.paused = now_paused;
+            if let Err(e) = settings.save(&c.config_path) {
+                log::error!("cannot save settings: {e}");
+            }
+        }
+        if let Some(tray) = c.tray.borrow().as_ref() {
+            tray.set_paused(now_paused);
         }
     });
     app.add_action(&pause);

@@ -22,6 +22,7 @@ pub struct Settings {
     pub paused: bool,
     pub shortcut: ShortcutChoice,
     pub start_at_login: bool,
+    pub show_tray_icon: bool,
     pub first_run_done: bool,
     pub saved_gnome_message_tray: Option<Vec<String>>,
     pub recent_emoji: Vec<String>,
@@ -36,6 +37,7 @@ impl Default for Settings {
             paused: false,
             shortcut: ShortcutChoice::None,
             start_at_login: true,
+            show_tray_icon: true,
             first_run_done: false,
             saved_gnome_message_tray: None,
             recent_emoji: Vec::new(),
@@ -110,6 +112,7 @@ mod tests {
             paused: true,
             shortcut: ShortcutChoice::CtrlAltV,
             start_at_login: false,
+            show_tray_icon: false,
             first_run_done: true,
             saved_gnome_message_tray: Some(vec!["<Super>v".into(), "<Super>m".into()]),
             recent_emoji: vec!["😀".into(), "🎉".into()],
@@ -126,5 +129,7 @@ mod tests {
         let s = Settings::load(&path);
         assert_eq!(s.max_items, 75);
         assert!(s.start_at_login);
+        // A file written before the icon existed shows it.
+        assert!(s.show_tray_icon);
     }
 }

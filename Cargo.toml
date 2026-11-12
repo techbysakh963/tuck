@@ -20,6 +20,7 @@ emojis = "0.9.1"
 gdk4-x11 = "0.11"
 gtk4 = { version = "0.11", features = ["v4_14"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+ksni = { version = "0.3.7", features = ["blocking"] }
 libadwaita = { version = "0.9", features = ["v1_5"] }
 libc = "0.2.191"
 log = { version = "0.4.35", features = ["std"] }
@@ -48,7 +49,7 @@ opt-level = 3
 opt-level = 3
 
 [package.metadata.deb]
-revision = "2"
+revision = "3"
 maintainer = "techbysakh963 <240957230+techbysakh963@users.noreply.github.com>"
 section = "utils"
 priority = "optional"

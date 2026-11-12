@@ -239,6 +239,19 @@ fn general_group(ctx: &Rc<AppCtx>) -> adw::PreferencesGroup {
         save(&c);
     });
     group.add(&login);
+
+    let tray = adw::SwitchRow::builder()
+        .title("Show icon in top bar")
+        .subtitle("Needs the AppIndicator extension, which Ubuntu enables by default")
+        .active(ctx.settings.borrow().show_tray_icon)
+        .build();
+    let c = ctx.clone();
+    tray.connect_active_notify(move |row| {
+        c.settings.borrow_mut().show_tray_icon = row.is_active();
+        save(&c);
+        c.sync_tray();
+    });
+    group.add(&tray);
     group
 }
 

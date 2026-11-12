@@ -16,6 +16,7 @@ pub mod private;
 pub mod settings;
 pub mod shortcut;
 pub mod target;
+pub mod tray;
 
 /// Application identifier shared by the desktop entry, D-Bus name and settings.
 pub const APP_ID: &str = "io.github.techbysakh963.Tuck";
