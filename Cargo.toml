@@ -46,3 +46,39 @@ opt-level = 3
 # Decoding and encoding large screenshots in unoptimised test builds is very slow.
 [profile.dev.package.image]
 opt-level = 3
+
+[package.metadata.deb]
+maintainer = "techbysakh963 <240957230+techbysakh963@users.noreply.github.com>"
+section = "utils"
+priority = "optional"
+depends = "libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5)"
+extended-description = "Tuck keeps a searchable history of what you copy and pastes it back with one click. It also has emoji and symbol pickers."
+maintainer-scripts = "packaging/"
+assets = [
+    ["target/release/tuck", "usr/bin/tuck", "755"],
+    ["data/io.github.techbysakh963.Tuck.desktop", "usr/share/applications/", "644"],
+    ["data/io.github.techbysakh963.Tuck.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["data/icons/io.github.techbysakh963.Tuck.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["data/icons/io.github.techbysakh963.Tuck-symbolic.svg", "usr/share/icons/hicolor/symbolic/apps/", "644"],
+    ["data/70-tuck-uinput.rules", "usr/lib/udev/rules.d/", "644"],
+    ["data/tuck-uinput.conf", "usr/lib/modules-load.d/", "644"],
+    ["README.md", "usr/share/doc/tuck/README", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/tuck", dest = "/usr/bin/tuck", mode = "755" },
+    { source = "data/io.github.techbysakh963.Tuck.desktop", dest = "/usr/share/applications/io.github.techbysakh963.Tuck.desktop", mode = "644" },
+    { source = "data/io.github.techbysakh963.Tuck.metainfo.xml", dest = "/usr/share/metainfo/io.github.techbysakh963.Tuck.metainfo.xml", mode = "644" },
+    { source = "data/icons/io.github.techbysakh963.Tuck.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.techbysakh963.Tuck.svg", mode = "644" },
+    { source = "data/icons/io.github.techbysakh963.Tuck-symbolic.svg", dest = "/usr/share/icons/hicolor/symbolic/apps/io.github.techbysakh963.Tuck-symbolic.svg", mode = "644" },
+    { source = "data/70-tuck-uinput.rules", dest = "/usr/lib/udev/rules.d/70-tuck-uinput.rules", mode = "644" },
+    { source = "data/tuck-uinput.conf", dest = "/usr/lib/modules-load.d/tuck-uinput.conf", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/tuck/LICENSE", mode = "644", doc = true },
+]
+post_install_script = "packaging/postinst"
+post_uninstall_script = "packaging/postrm"
+
+[package.metadata.generate-rpm.requires]
+gtk4 = ">= 4.14"
+libadwaita = ">= 1.5"

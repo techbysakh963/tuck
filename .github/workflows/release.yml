@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libxkbcommon-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-deb --locked
+      - run: cargo deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+
+  rpm:
+    runs-on: ubuntu-latest
+    container: fedora:40
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y gcc git pkgconf-pkg-config gtk4-devel libadwaita-devel libxkbcommon-devel rust cargo
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-generate-rpm --locked
+      - run: cargo build --release
+      - run: ~/.cargo/bin/cargo-generate-rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/generate-rpm/*.rpm
+
+  publish:
+    needs: [deb, rpm]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Notes come from RELEASE_NOTES.md when the tagged commit carries one,
+          # otherwise from the tag message.
+          if [ -f RELEASE_NOTES.md ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
+          fi
