@@ -124,6 +124,8 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
         text: glyph.to_string(),
         html: None,
     };
+    // Only set when this app owned the clipboard before the insert.
+    let before = clipboard.content();
     ctx.echo.borrow_mut().arm(fingerprint(&captured), now_ms());
     let provider = gdk::ContentProvider::for_value(&glyph.to_value());
     if let Err(e) = clipboard.set_content(Some(&provider)) {
@@ -140,7 +142,19 @@ pub async fn insert_glyph(ctx: &Rc<AppCtx>, glyph: &str) {
     }
 
     glib::timeout_future(RESTORE_DELAY).await;
-    restore_previous(ctx);
+    // Something else copied in the meantime: leave the newer content alone.
+    if clipboard.content().as_ref() != Some(&provider) {
+        log::info!("clipboard changed during the insert; not restoring");
+        return;
+    }
+    match before {
+        Some(previous) => {
+            if let Err(e) = clipboard.set_content(Some(&previous)) {
+                log::warn!("cannot restore the clipboard: {e}");
+            }
+        }
+        None => restore_previous(ctx),
+    }
 }
 
 /// Puts the most recently used history item back on the clipboard, arming the
