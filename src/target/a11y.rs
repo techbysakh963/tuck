@@ -35,15 +35,26 @@ pub fn has_state(words: &[u32], bit: u32) -> bool {
         .is_some_and(|w| w & (1 << (bit % 32)) != 0)
 }
 
+/// How long the next bus call may take: `CALL_TIMEOUT`, cut short by the
+/// request's deadline; `None` once that has passed.
+fn call_window(now: Instant, deadline: Instant) -> Option<Duration> {
+    let left = deadline.checked_duration_since(now)?;
+    (!left.is_zero()).then(|| left.min(CALL_TIMEOUT))
+}
+
 /// Where detection gave up; logged with how long it had taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     OpenBus,
     NoActiveWindow,
+    /// The request's time ran out; says nothing about the bus.
+    OutOfTime,
 }
 
 struct Request {
     reply: mpsc::Sender<Result<TargetKind, Stage>>,
+    /// Past this the caller has stopped waiting.
+    expires: Instant,
 }
 
 static WORKER: OnceLock<async_channel::Sender<Request>> = OnceLock::new();
@@ -78,12 +89,18 @@ async fn worker(rx: async_channel::Receiver<Request>) {
         if conn.is_none() {
             conn = connect(&runtime).await;
         }
+        // Requests queued behind a slow one, or behind reconnecting, are
+        // answered by dropping them: their callers have moved on.
+        if call_window(Instant::now(), request.expires).is_none() {
+            log::info!("target detection request expired before it was handled");
+            continue;
+        }
         let result = match &conn {
             Some(c) => {
                 let bus = Bus {
                     conn: c.clone(),
                     runtime: runtime.clone(),
-                    deadline: Instant::now() + CALL_BUDGET,
+                    deadline: request.expires,
                 };
                 let result = walk(&bus).await;
                 if matches!(result, Err(Stage::OpenBus)) {
@@ -129,11 +146,14 @@ fn log_outcome(result: &Result<TargetKind, Stage>, started: Instant) {
 
 pub fn detect() -> TargetKind {
     let (reply, answer) = mpsc::channel();
-    if sender().try_send(Request { reply }).is_err() {
+    let expires = Instant::now() + CALL_BUDGET;
+    if sender().try_send(Request { reply, expires }).is_err() {
         return TargetKind::Unknown;
     }
+    // A call may overrun the budget by a moment; reconnecting to the bus
+    // first may take longer still, and then the answer is not waited for.
     answer
-        .recv()
+        .recv_timeout(CALL_BUDGET + CALL_TIMEOUT)
         .ok()
         .and_then(Result::ok)
         .unwrap_or(TargetKind::Unknown)
@@ -152,13 +172,11 @@ impl Bus {
     where
         T: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
     {
-        if Instant::now() >= self.deadline {
-            return None;
-        }
+        let limit = call_window(Instant::now(), self.deadline)?;
         let call = self
             .conn
             .call_method(Some(dest), path, Some(iface), method, &());
-        let msg = self.runtime.timeout(CALL_TIMEOUT, call).await.ok()?.ok()?;
+        let msg = self.runtime.timeout(limit, call).await.ok()?.ok()?;
         msg.body().deserialize::<T>().ok()
     }
 
@@ -185,6 +203,7 @@ impl Bus {
     }
 
     async fn process_name(&self, bus_name: &str) -> Option<String> {
+        let limit = call_window(Instant::now(), self.deadline)?;
         let args = (bus_name,);
         let call = self.conn.call_method(
             Some("org.freedesktop.DBus"),
@@ -193,7 +212,7 @@ impl Bus {
             "GetConnectionUnixProcessID",
             &args,
         );
-        let msg = self.runtime.timeout(CALL_TIMEOUT, call).await.ok()?.ok()?;
+        let msg = self.runtime.timeout(limit, call).await.ok()?.ok()?;
         let pid: u32 = msg.body().deserialize().ok()?;
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
         Some(comm.trim().to_string())
@@ -233,10 +252,17 @@ async fn walk(bus: &Bus) -> Result<TargetKind, Stage> {
     );
     let apps = bus.children(&root).await;
     if apps.is_empty() {
+        // Only a bus that failed with time left is reopened.
+        if Instant::now() >= bus.deadline {
+            return Err(Stage::OutOfTime);
+        }
         return Err(Stage::OpenBus);
     }
     let mut saw_active_window = false;
     for app in apps {
+        if Instant::now() >= bus.deadline {
+            break;
+        }
         // gnome-shell answers slowly and never hosts the paste target.
         if bus.process_name(&app.0).await.as_deref() == Some("gnome-shell") {
             continue;
@@ -257,6 +283,8 @@ async fn walk(bus: &Bus) -> Result<TargetKind, Stage> {
     }
     if saw_active_window {
         Ok(TargetKind::Other)
+    } else if Instant::now() >= bus.deadline {
+        Err(Stage::OutOfTime)
     } else {
         Err(Stage::NoActiveWindow)
     }
@@ -291,6 +319,16 @@ async fn search_terminal(bus: &Bus, frame: ObjectRef) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calls_stop_at_the_request_deadline() {
+        let now = Instant::now();
+        assert_eq!(call_window(now, now + CALL_BUDGET), Some(CALL_TIMEOUT));
+        let near = Duration::from_millis(20);
+        assert_eq!(call_window(now, now + near), Some(near));
+        assert_eq!(call_window(now, now), None);
+        assert_eq!(call_window(now + near, now), None);
+    }
 
     #[test]
     fn state_bitfield() {
