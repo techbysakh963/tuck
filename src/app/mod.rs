@@ -446,6 +446,9 @@ pub fn run() -> glib::ExitCode {
         }
     });
 
+    // Launching from the app grid (D-Bus activation) opens the popup.
+    app.connect_activate(|app| app.activate_action("toggle", None));
+
     app.connect_command_line(move |app, cmdline| {
         match parse_args(&cmdline.arguments()) {
             Request::Toggle => app.activate_action("toggle", None),
