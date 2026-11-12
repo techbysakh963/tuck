@@ -1,8 +1,10 @@
 //! The resident application: actions, command line, capture wiring.
 
 pub mod clipboard_page;
+pub mod first_run;
 pub mod grid_page;
 pub mod paste_flow;
+pub mod preferences;
 pub mod row;
 pub mod symbols;
 pub mod window;
@@ -241,8 +243,8 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let preferences = gio::SimpleAction::new("preferences", None);
     let c = ctx.clone();
     preferences.connect_activate(move |_, _| {
-        c.window.add_toast("Preferences are not available yet");
         c.window.present();
+        preferences::present(&c);
     });
     app.add_action(&preferences);
 
@@ -323,6 +325,10 @@ pub async fn open_popup(ctx: &Rc<AppCtx>) {
         center_on_pointer_monitor(&ctx.window.window);
     }
     ctx.opening.set(false);
+
+    if !ctx.settings.borrow().first_run_done {
+        first_run::present(ctx);
+    }
 
     let pending: Vec<String> = ctx.toasts.borrow_mut().drain(..).collect();
     for message in pending {

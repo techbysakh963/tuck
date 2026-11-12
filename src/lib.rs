@@ -1,6 +1,7 @@
 //! Tuck: clipboard history for GNOME.
 
 pub mod app;
+pub mod autostart;
 pub mod blobs;
 pub mod capture;
 pub mod echo;
@@ -13,6 +14,7 @@ pub mod paste;
 pub mod privacy;
 pub mod private;
 pub mod settings;
+pub mod shortcut;
 pub mod target;
 
 /// Application identifier shared by the desktop entry, D-Bus name and settings.
