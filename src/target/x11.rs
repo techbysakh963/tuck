@@ -27,6 +27,20 @@ const TERMINALS: &[&str] = &[
     "st",
     "ghostty",
     "warp",
+    "blackbox",
+    "terminology",
+    "deepin-terminal",
+    "guake",
+    "yakuake",
+    "tilda",
+    "sakura",
+    "termite",
+    "rio",
+    "contour",
+    "tabby",
+    "hyper",
+    "cool-retro-term",
+    "x-terminal-emulator",
 ];
 
 /// True when one of the class strings is a known terminal. Accepts the quoted
@@ -100,6 +114,8 @@ mod tests {
         ));
         assert!(wm_class_is_terminal("kitty\0kitty\0"));
         assert!(wm_class_is_terminal(r#""org.gnome.Ptyxis", "Ptyxis""#));
+        assert!(wm_class_is_terminal(r#""guake", "Guake""#));
+        assert!(wm_class_is_terminal("com.raggesilver.BlackBox"));
     }
 
     #[test]
