@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead.
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      description: Output of `echo $XDG_SESSION_TYPE`.
+      options: [Wayland, X11, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: XDG_CURRENT_DESKTOP
+      description: Output of `echo $XDG_CURRENT_DESKTOP`.
+      placeholder: ubuntu:GNOME
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed Tuck
+      options: [".deb from Releases", ".rpm from Releases", "Built from source"]
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: >
+        The last lines of `~/.local/share/tuck/logs/tuck.log`. The log does not
+        contain clipboard content, but check it before posting.
+      render: text
