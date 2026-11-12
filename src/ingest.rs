@@ -37,24 +37,47 @@ pub fn ingest(
     paused: bool,
     now_ms: i64,
 ) -> io::Result<IngestResult> {
+    if let Some(reason) = precheck(&ev, filter, echo, paused, now_ms) {
+        return Ok(IngestResult::Skipped(reason));
+    }
+    store_event(ev, store, now_ms)
+}
+
+/// The privacy, pause and echo rules. Consumes the echo mark when it matches, so
+/// call it exactly once per event, when the event arrives.
+pub fn precheck(
+    ev: &CaptureEvent,
+    filter: &PrivacyFilter,
+    echo: &mut EchoGuard,
+    paused: bool,
+    now_ms: i64,
+) -> Option<SkipReason> {
     if paused {
-        return Ok(IngestResult::Skipped(SkipReason::Paused));
+        return Some(SkipReason::Paused);
     }
     if filter.is_secret_offer(&ev.mime_types, ev.secret_hint.as_deref()) {
-        return Ok(IngestResult::Skipped(SkipReason::Secret));
+        return Some(SkipReason::Secret);
     }
     if is_empty(&ev.captured) {
-        return Ok(IngestResult::Skipped(SkipReason::Empty));
+        return Some(SkipReason::Empty);
     }
     if let Captured::Text { text, .. } = &ev.captured {
         if filter.matches_text(text) {
-            return Ok(IngestResult::Skipped(SkipReason::Excluded));
+            return Some(SkipReason::Excluded);
         }
     }
     if echo.is_echo(fingerprint(&ev.captured), now_ms) {
-        return Ok(IngestResult::Skipped(SkipReason::Echo));
+        return Some(SkipReason::Echo);
     }
+    None
+}
 
+/// Adds an event that already passed `precheck`.
+pub fn store_event(
+    ev: CaptureEvent,
+    store: &mut HistoryStore,
+    now_ms: i64,
+) -> io::Result<IngestResult> {
     let outcome = match ev.captured {
         Captured::Text { text, html } => store.add_text(text, html, ev.source, now_ms)?,
         Captured::Image { png } => store.add_image(&png, ev.source, now_ms)?,

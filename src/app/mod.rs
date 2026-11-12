@@ -21,10 +21,12 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use crate::capture::Captured;
 use crate::capture::{self, BackendKind, CaptureEvent};
 use crate::echo::EchoGuard;
 use crate::history::HistoryStore;
-use crate::ingest::{ingest, IngestResult};
+use crate::history::{prepare_image, PreparedImage};
+use crate::ingest::{precheck, store_event, IngestResult};
 use crate::paste::{Combo, KeySender, UinputKeyboard, XTestSender};
 use crate::privacy::PrivacyFilter;
 use crate::settings::Settings;
@@ -271,21 +273,63 @@ fn start_capture(ctx: &Rc<AppCtx>) {
 fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     prune_by_age(ctx);
     let paused = ctx.settings.borrow().paused;
-    let result = {
-        let mut store = ctx.store.borrow_mut();
-        let filter = ctx.filter.borrow();
-        let mut echo = ctx.echo.borrow_mut();
-        ingest(event, &mut store, &filter, &mut echo, paused, now_ms())
-    };
-    match result {
-        Ok(IngestResult::Stored(_)) => {
-            schedule_save(ctx);
-            if ctx.window.is_visible() {
-                ctx.window.clipboard.refresh(false);
+    let now = now_ms();
+    // The echo guard and privacy rules run here, in arrival order, whatever happens next.
+    let skipped = precheck(
+        &event,
+        &ctx.filter.borrow(),
+        &mut ctx.echo.borrow_mut(),
+        paused,
+        now,
+    );
+    if let Some(reason) = skipped {
+        log::debug!("capture skipped: {reason:?}");
+        return;
+    }
+    match event.captured {
+        // Decoding, scaling and writing an image can take long enough to stall the UI.
+        Captured::Image { png } => {
+            let blobs = ctx.store.borrow().blob_store();
+            let source = event.source;
+            let ctx = ctx.clone();
+            glib::spawn_future_local(async move {
+                let started = Instant::now();
+                let prepared = gio::spawn_blocking(move || prepare_image(&png, &blobs)).await;
+                match prepared {
+                    Ok(Ok(prepared)) => {
+                        log::debug!("image prepared in {} ms", started.elapsed().as_millis());
+                        add_prepared(&ctx, prepared, source, now);
+                    }
+                    Ok(Err(e)) => log::warn!("capture failed: {e}"),
+                    Err(_) => log::error!("image worker panicked"),
+                }
+            });
+        }
+        captured => {
+            let event = CaptureEvent { captured, ..event };
+            let result = store_event(event, &mut ctx.store.borrow_mut(), now);
+            match result {
+                Ok(IngestResult::Stored(_)) => stored(ctx),
+                Ok(IngestResult::Skipped(reason)) => {
+                    log::debug!("capture skipped: {reason:?}")
+                }
+                Err(e) => log::warn!("capture failed: {e}"),
             }
         }
-        Ok(IngestResult::Skipped(reason)) => log::debug!("capture skipped: {reason:?}"),
-        Err(e) => log::warn!("capture failed: {e}"),
+    }
+}
+
+fn add_prepared(ctx: &Rc<AppCtx>, prepared: PreparedImage, source: Option<String>, now: i64) {
+    ctx.store
+        .borrow_mut()
+        .add_prepared_image(prepared, source, now);
+    stored(ctx);
+}
+
+fn stored(ctx: &Rc<AppCtx>) {
+    schedule_save(ctx);
+    if ctx.window.is_visible() {
+        ctx.window.clipboard.refresh(false);
     }
 }
 
