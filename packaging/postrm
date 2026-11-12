@@ -1,4 +1,10 @@
 #!/bin/sh
 set -e
-udevadm control --reload-rules || true
+case "$1" in
+    remove|purge)
+        # Without the retrigger the access granted by the rule can outlast the package until reboot.
+        udevadm control --reload-rules || true
+        udevadm trigger --action=change --subsystem-match=misc --sysname-match=uinput || true
+        ;;
+esac
 exit 0
