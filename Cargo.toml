@@ -3,7 +3,14 @@ name = "tuck"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+rust-version = "1.92"
 description = "Clipboard history, emoji and symbol picker for GNOME"
+repository = "https://github.com/techbysakh963/tuck"
+homepage = "https://github.com/techbysakh963/tuck"
+readme = "README.md"
+keywords = ["clipboard", "gnome", "gtk4", "emoji", "history"]
+categories = ["gui"]
+publish = false
 
 [lib]
 name = "tuck"
@@ -49,11 +56,12 @@ opt-level = 3
 opt-level = 3
 
 [package.metadata.deb]
-revision = "4"
+revision = "1"
 maintainer = "techbysakh963 <240957230+techbysakh963@users.noreply.github.com>"
 section = "utils"
 priority = "optional"
-depends = "libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5)"
+depends = "$auto, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5)"
+recommends = "gnome-shell-extension-appindicator"
 extended-description = "Tuck keeps a searchable history of what you copy and pastes it back with one click. It also has emoji and symbol pickers."
 maintainer-scripts = "packaging/"
 assets = [
