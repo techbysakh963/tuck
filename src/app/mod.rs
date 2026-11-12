@@ -12,6 +12,7 @@ pub mod window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gtk4 as gtk;
@@ -753,6 +754,57 @@ fn parse_args(args: &[std::ffi::OsString]) -> Request {
 
 const USAGE: &str = "Usage: tuck [--toggle | --background | --preferences]\n";
 
+static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn on_quit_signal(_: libc::c_int) {
+    let fd = SIGNAL_PIPE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = 1u8;
+        // Only async-signal-safe work here: one write, result ignored.
+        unsafe { libc::write(fd, std::ptr::addr_of!(byte).cast(), 1) };
+    }
+}
+
+/// SIGTERM (logout, `pkill`) and SIGINT quit normally, so the shutdown handler
+/// writes the history instead of losing the last half second of changes. The
+/// handler only writes to a pipe; a thread blocked on it wakes the main loop.
+fn quit_on_signals(app: &adw::Application) {
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        log::warn!("cannot watch for termination signals");
+        return;
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    SIGNAL_PIPE.store(write_fd, Ordering::Relaxed);
+    let (tx, rx) = async_channel::bounded::<()>(1);
+    std::thread::spawn(move || {
+        let mut byte = 0u8;
+        loop {
+            let n = unsafe { libc::read(read_fd, std::ptr::addr_of_mut!(byte).cast(), 1) };
+            if n > 0 {
+                let _ = tx.send_blocking(());
+                break;
+            }
+            if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+    });
+    let handler = on_quit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        if rx.recv().await.is_ok() {
+            log::info!("quitting on signal");
+            app.quit();
+        }
+    });
+}
+
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder()
         .application_id(APP_ID)
@@ -766,6 +818,7 @@ pub fn run() -> glib::ExitCode {
         // Stays resident: the window is built once and only hidden.
         std::mem::forget(app.hold());
         *slot.borrow_mut() = Some(build_ctx(app));
+        quit_on_signals(app);
     });
 
     let slot = ctx.clone();
