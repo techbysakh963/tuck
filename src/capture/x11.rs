@@ -138,7 +138,11 @@ impl Watcher<'_> {
         }
         let offered = self.offered_targets()?;
         let source = self.owner_class(owner);
-        read_capture(&offered, source, |mime| self.read_target(mime))
+        let event = read_capture(&offered, source, |mime| self.read_target(mime));
+        // Every conversion names the selection, not an owner, so after a change
+        // the offer list and the content (or its password-manager hint) may come
+        // from different owners. Drop the mix; the run loop reads again.
+        unless_owner_changed(event, self.dirty)
     }
 
     fn offered_targets(&mut self) -> Option<Vec<String>> {
@@ -375,10 +379,23 @@ fn is_answer_to(
     e.requestor == win && e.selection == selection && e.target == target
 }
 
+/// A capture is only kept when the selection owner stayed the same while it
+/// was read.
+fn unless_owner_changed<T>(event: Option<T>, owner_changed: bool) -> Option<T> {
+    event.filter(|_| !owner_changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use x11rb::protocol::xproto::SelectionNotifyEvent;
+
+    #[test]
+    fn capture_read_across_an_owner_change_is_dropped() {
+        assert_eq!(unless_owner_changed(Some(1), false), Some(1));
+        assert_eq!(unless_owner_changed(Some(1), true), None);
+        assert_eq!(unless_owner_changed::<i32>(None, true), None);
+    }
 
     fn notify(requestor: u32, selection: Atom, target: Atom) -> SelectionNotifyEvent {
         SelectionNotifyEvent {
