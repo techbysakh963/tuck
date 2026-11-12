@@ -8,7 +8,13 @@ fn main() {
     };
     eprintln!("backend: {kind:?}");
     let (tx, rx) = async_channel::unbounded();
-    let _watcher = tuck::capture::spawn(kind, tx);
+    let (status_tx, status_rx) = async_channel::unbounded();
+    let _watcher = tuck::capture::spawn(tx, status_tx);
+    std::thread::spawn(move || {
+        while let Ok(status) = status_rx.recv_blocking() {
+            eprintln!("watcher status: {status:?}");
+        }
+    });
     while let Ok(event) = rx.recv_blocking() {
         let summary = match &event.captured {
             tuck::capture::Captured::Text { text, html } => {

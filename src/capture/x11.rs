@@ -22,7 +22,7 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3);
 const DEST_PROPERTY: &[u8] = b"TUCK_SELECTION";
 
 /// Watches the CLIPBOARD selection until the connection fails or `tx` closes.
-pub(super) fn run(tx: &Sender<CaptureEvent>) -> Result<(), String> {
+pub(super) fn run(tx: &Sender<CaptureEvent>, ready: &dyn Fn()) -> Result<(), String> {
     let (conn, screen_num, fd) = connect_with_fd()?;
     let root = conn.setup().roots[screen_num].root;
     let win = conn.generate_id().map_err(|e| e.to_string())?;
@@ -56,6 +56,7 @@ pub(super) fn run(tx: &Sender<CaptureEvent>) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
+    ready();
 
     let mut watcher = Watcher {
         conn: &conn,

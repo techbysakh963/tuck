@@ -22,7 +22,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::capture::Captured;
-use crate::capture::{self, BackendKind, CaptureEvent};
+use crate::capture::{self, CaptureEvent, CaptureStatus};
 use crate::echo::EchoGuard;
 use crate::history::HistoryStore;
 use crate::history::{prepare_image, PreparedImage};
@@ -91,6 +91,29 @@ impl AppCtx {
         self.window.prepare_to_show();
         self.window.present();
         self.window.add_toast(message);
+    }
+
+    /// Shows the message on the open popup, or at the next open.
+    pub fn notify_now_or_later(&self, message: &str) {
+        if self.window.is_visible() {
+            self.window.add_toast(message);
+        } else {
+            self.queue_toast(message);
+        }
+    }
+
+    /// Drops a queued message that no longer applies and says so when the popup
+    /// is open.
+    pub fn retract_toast(&self, message: &str) {
+        let was_queued = {
+            let mut toasts = self.toasts.borrow_mut();
+            let before = toasts.len();
+            toasts.retain(|t| t != message);
+            toasts.len() != before
+        };
+        if !was_queued {
+            self.notify_now_or_later("Clipboard recording resumed");
+        }
     }
 
     /// Shown the next time the popup opens (and logged by the caller).
@@ -263,18 +286,23 @@ fn handle_tray_commands(app: &adw::Application, rx: async_channel::Receiver<Tray
     });
 }
 
+const CAPTURE_STOPPED: &str = "Clipboard recording stopped; retrying";
+
 fn start_capture(ctx: &Rc<AppCtx>) {
-    let env = capture::probe_session();
-    let Some(kind) = capture::select_backend(&env) else {
-        log::error!("no clipboard backend available: {env:?}");
-        ctx.queue_toast("Cannot watch the clipboard in this session");
-        return;
-    };
-    log::info!("clipboard backend: {kind:?}");
-    let _: BackendKind = kind;
     let (tx, rx) = async_channel::unbounded::<CaptureEvent>();
+    let (status_tx, status_rx) = async_channel::unbounded::<CaptureStatus>();
     // The watcher thread ends with the process; nothing joins it.
-    drop(capture::spawn(kind, tx));
+    drop(capture::spawn(tx, status_tx));
+
+    let c = ctx.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(status) = status_rx.recv().await {
+            match status {
+                CaptureStatus::Stopped => c.notify_now_or_later(CAPTURE_STOPPED),
+                CaptureStatus::Recovered => c.retract_toast(CAPTURE_STOPPED),
+            }
+        }
+    });
 
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {

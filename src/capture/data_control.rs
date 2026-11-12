@@ -109,7 +109,7 @@ macro_rules! data_control_backend {
         offer: $off_mod:ident :: $Off:ident,
         path: $path:ident
     ) => {
-        pub(super) fn $run(tx: &Sender<CaptureEvent>) -> Result<(), String> {
+        pub(super) fn $run(tx: &Sender<CaptureEvent>, ready: &dyn Fn()) -> Result<(), String> {
             use $path::$mgr_mod::$Mgr;
 
             let conn = Connection::connect_to_env().map_err(|e| e.to_string())?;
@@ -123,16 +123,21 @@ macro_rules! data_control_backend {
                 .bind(&qh, 1..=1, ())
                 .map_err(|e| format!("seat: {e}"))?;
             let _device = manager.get_data_device(&seat, &qh, ());
+            ready();
             let mut state = $state {
                 conn: conn.clone(),
                 offers: HashMap::new(),
                 tx: tx.clone(),
                 closed: false,
+                finished: false,
             };
             while !state.closed {
                 queue
                     .blocking_dispatch(&mut state)
                     .map_err(|e| format!("Wayland connection lost: {e}"))?;
+            }
+            if state.finished {
+                return Err("the compositor closed the data device".into());
             }
             Ok(())
         }
@@ -142,6 +147,8 @@ macro_rules! data_control_backend {
             offers: HashMap<wayland_client::backend::ObjectId, Vec<String>>,
             tx: Sender<CaptureEvent>,
             closed: bool,
+            /// The compositor ended the device, as opposed to our receiver going away.
+            finished: bool,
         }
 
         impl Dispatch<WlRegistry, GlobalListContents> for $state {
@@ -223,7 +230,10 @@ macro_rules! data_control_backend {
                             }
                         }
                     }
-                    Event::Finished => state.closed = true,
+                    Event::Finished => {
+                        state.closed = true;
+                        state.finished = true;
+                    }
                     // The primary selection is not the clipboard.
                     Event::PrimarySelection { id: Some(offer) } => {
                         state.offers.remove(&offer.id());

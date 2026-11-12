@@ -1,6 +1,8 @@
 //! Clipboard capture: what a watcher reports to the rest of the app.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::time::Duration;
 
 mod data_control;
 mod x11;
@@ -91,23 +93,76 @@ pub fn probe_session() -> SessionEnv {
     env
 }
 
-/// Starts the backend on its own thread. The thread blocks on the display
-/// connection and ends when the connection drops or the receiver is gone.
+/// Whether the watcher is delivering clipboard changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStatus {
+    Stopped,
+    Recovered,
+}
+
+const BACKOFF_START: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Runs `connect_and_run` until it returns `Ok` (the receiver is gone). After a
+/// failure it waits, doubling from one second up to thirty, and tries again.
+/// `connect_and_run` calls the function it is given once it is watching, which
+/// resets the wait and reports recovery. The wait only happens while broken, so
+/// there is no polling while the watcher is healthy.
+pub(crate) fn supervise(
+    mut connect_and_run: impl FnMut(&dyn Fn()) -> Result<(), String>,
+    notify: impl Fn(CaptureStatus),
+    mut wait: impl FnMut(Duration),
+) {
+    let broken = Cell::new(false);
+    let backoff = Cell::new(BACKOFF_START);
+    let ready = || {
+        backoff.set(BACKOFF_START);
+        if broken.replace(false) {
+            notify(CaptureStatus::Recovered);
+        }
+    };
+    loop {
+        match connect_and_run(&ready) {
+            Ok(()) => return,
+            Err(e) => {
+                log::error!("clipboard watcher stopped: {e}");
+                if !broken.replace(true) {
+                    notify(CaptureStatus::Stopped);
+                }
+                wait(backoff.get());
+                backoff.set((backoff.get() * 2).min(BACKOFF_MAX));
+            }
+        }
+    }
+}
+
+/// Starts the watcher on its own thread. It re-probes the session and
+/// reconnects whenever the backend fails, and reports status changes on
+/// `status`. The thread ends when the event receiver is gone.
 pub fn spawn(
-    kind: BackendKind,
     tx: async_channel::Sender<CaptureEvent>,
+    status: async_channel::Sender<CaptureStatus>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("tuck-capture".into())
         .spawn(move || {
-            let result = match kind {
-                BackendKind::X11 => x11::run(&tx),
-                BackendKind::ExtDataControl => data_control::run_ext(&tx),
-                BackendKind::WlrDataControl => data_control::run_wlr(&tx),
-            };
-            if let Err(e) = result {
-                log::error!("clipboard watcher stopped: {e}");
-            }
+            supervise(
+                |ready| {
+                    let env = probe_session();
+                    let kind = select_backend(&env)
+                        .ok_or_else(|| format!("no clipboard backend available: {env:?}"))?;
+                    log::info!("clipboard backend: {kind:?}");
+                    match kind {
+                        BackendKind::X11 => x11::run(&tx, ready),
+                        BackendKind::ExtDataControl => data_control::run_ext(&tx, ready),
+                        BackendKind::WlrDataControl => data_control::run_wlr(&tx, ready),
+                    }
+                },
+                |s| {
+                    let _ = status.send_blocking(s);
+                },
+                std::thread::sleep,
+            );
         })
         .expect("spawn capture thread")
 }
@@ -277,6 +332,55 @@ mod tests {
         );
         assert_eq!(select_backend(&env(true, false, &["wl_seat"])), None);
         assert_eq!(select_backend(&env(false, false, &[])), None);
+    }
+
+    #[test]
+    fn supervise_backs_off_then_recovers() {
+        let attempts = Cell::new(0);
+        let waits = std::cell::RefCell::new(Vec::new());
+        let events = std::cell::RefCell::new(Vec::new());
+        supervise(
+            |ready| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() <= 2 {
+                    return Err("down".into());
+                }
+                ready();
+                Ok(())
+            },
+            |s| events.borrow_mut().push(s),
+            |d| waits.borrow_mut().push(d),
+        );
+        assert_eq!(
+            *waits.borrow(),
+            vec![Duration::from_secs(1), Duration::from_secs(2)]
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![CaptureStatus::Stopped, CaptureStatus::Recovered]
+        );
+    }
+
+    #[test]
+    fn supervise_caps_the_wait_and_resets_after_recovery() {
+        let attempts = Cell::new(0);
+        let waits = std::cell::RefCell::new(Vec::new());
+        supervise(
+            |ready| {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1..=7 => Err("down".into()),
+                    8 => {
+                        ready();
+                        Err("dropped again".into())
+                    }
+                    _ => Ok(()),
+                }
+            },
+            |_| {},
+            |d| waits.borrow_mut().push(d.as_secs()),
+        );
+        assert_eq!(*waits.borrow(), vec![1, 2, 4, 8, 16, 30, 30, 1]);
     }
 
     #[test]
