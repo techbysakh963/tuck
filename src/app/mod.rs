@@ -732,11 +732,13 @@ pub async fn hide_and_wait_for_target(ctx: &AppCtx) {
     glib::timeout_future(FOCUS_RETURN_DELAY).await;
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Request {
     Toggle,
     Background,
     Preferences,
     Help,
+    Version,
     Unknown(String),
 }
 
@@ -748,12 +750,13 @@ fn parse_args(args: &[std::ffi::OsString]) -> Request {
             "--background" => Request::Background,
             "--preferences" => Request::Preferences,
             "--help" | "-h" => Request::Help,
+            "--version" | "-V" => Request::Version,
             other => Request::Unknown(other.to_string()),
         },
     }
 }
 
-const USAGE: &str = "Usage: tuck [--toggle | --background | --preferences]\n";
+const USAGE: &str = "Usage: tuck [--toggle | --background | --preferences | --version | --help]\n";
 
 static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
 
@@ -807,6 +810,25 @@ fn quit_on_signals(app: &adw::Application) {
 }
 
 pub fn run() -> glib::ExitCode {
+    // Answered here, in the calling terminal, even when Tuck is already running
+    // (the running instance would otherwise print into its own output).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match parse_args(&args) {
+        Request::Help => {
+            print!("{USAGE}");
+            return glib::ExitCode::SUCCESS;
+        }
+        Request::Version => {
+            println!("tuck {}", env!("CARGO_PKG_VERSION"));
+            return glib::ExitCode::SUCCESS;
+        }
+        Request::Unknown(arg) => {
+            eprint!("tuck: unknown option {arg}\n{USAGE}");
+            return glib::ExitCode::from(2);
+        }
+        Request::Toggle | Request::Background | Request::Preferences => {}
+    }
+
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -839,11 +861,8 @@ pub fn run() -> glib::ExitCode {
             Request::Toggle => app.activate_action("toggle", None),
             Request::Preferences => app.activate_action("preferences", None),
             Request::Background => {}
-            Request::Help => print!("{USAGE}"),
-            Request::Unknown(arg) => {
-                eprint!("tuck: unknown option {arg}\n{USAGE}");
-                return glib::ExitCode::from(2);
-            }
+            // Rejected in `run` before the application starts.
+            Request::Help | Request::Version | Request::Unknown(_) => {}
         }
         glib::ExitCode::SUCCESS
     });
@@ -865,6 +884,31 @@ mod tests {
         assert_eq!(q.finish(), None);
         // Idle again: the next image starts at once.
         assert_eq!(q.submit(4), Some(4));
+    }
+
+    fn args(list: &[&str]) -> Vec<std::ffi::OsString> {
+        list.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn command_line_parsing() {
+        assert_eq!(parse_args(&args(&["tuck"])), Request::Toggle);
+        assert_eq!(parse_args(&args(&["tuck", "--toggle"])), Request::Toggle);
+        assert_eq!(
+            parse_args(&args(&["tuck", "--background"])),
+            Request::Background
+        );
+        assert_eq!(
+            parse_args(&args(&["tuck", "--preferences"])),
+            Request::Preferences
+        );
+        assert_eq!(parse_args(&args(&["tuck", "-h"])), Request::Help);
+        assert_eq!(parse_args(&args(&["tuck", "--help"])), Request::Help);
+        assert_eq!(parse_args(&args(&["tuck", "--version"])), Request::Version);
+        assert_eq!(
+            parse_args(&args(&["tuck", "--bogus"])),
+            Request::Unknown("--bogus".into())
+        );
     }
 
     #[test]
