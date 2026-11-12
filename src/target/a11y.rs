@@ -34,8 +34,31 @@ pub fn has_state(words: &[u32], bit: u32) -> bool {
         .is_some_and(|w| w & (1 << (bit % 32)) != 0)
 }
 
+/// Where detection gave up; logged with how long it had taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    OpenBus,
+    NoActiveWindow,
+}
+
 pub fn detect() -> TargetKind {
-    find_focused_terminal().unwrap_or(TargetKind::Unknown)
+    let started = Instant::now();
+    match find_focused_terminal() {
+        Ok(kind) => {
+            log::info!(
+                "target detection: {kind:?} in {} ms",
+                started.elapsed().as_millis()
+            );
+            kind
+        }
+        Err(stage) => {
+            log::info!(
+                "target detection failed at {stage:?} after {} ms",
+                started.elapsed().as_millis()
+            );
+            TargetKind::Unknown
+        }
+    }
 }
 
 struct Bus {
@@ -122,20 +145,21 @@ async fn open_bus(runtime: &SharedRuntime) -> Option<Connection> {
         .ok()
 }
 
-/// `Some(Terminal)` when a focused terminal widget exists in the active
-/// window, `Some(Other)` when an active window was found without one, and
-/// `None` when the accessibility bus gave no usable answer.
-fn find_focused_terminal() -> Option<TargetKind> {
+/// `Terminal` when a focused terminal widget exists in the active window,
+/// `Other` when an active window was found without one, and the failed stage
+/// when the accessibility bus gave no usable answer.
+fn find_focused_terminal() -> Result<TargetKind, Stage> {
     zruntime::block_on(async {
-        let runtime = SharedRuntime::current().ok()?;
+        let runtime = SharedRuntime::current().map_err(|_| Stage::OpenBus)?;
         let bus = Bus {
-            conn: open_bus(&runtime).await?,
+            conn: open_bus(&runtime).await.ok_or(Stage::OpenBus)?,
             runtime,
             deadline: Instant::now() + CALL_BUDGET,
         };
         let root: ObjectRef = (
             "org.a11y.atspi.Registry".into(),
-            OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root").ok()?,
+            OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root")
+                .map_err(|_| Stage::OpenBus)?,
         );
 
         let mut saw_active_window = false;
@@ -154,11 +178,15 @@ fn find_focused_terminal() -> Option<TargetKind> {
                 }
                 saw_active_window = true;
                 if search_terminal(&bus, frame).await {
-                    return Some(TargetKind::Terminal);
+                    return Ok(TargetKind::Terminal);
                 }
             }
         }
-        saw_active_window.then_some(TargetKind::Other)
+        if saw_active_window {
+            Ok(TargetKind::Other)
+        } else {
+            Err(Stage::NoActiveWindow)
+        }
     })
 }
 

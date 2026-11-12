@@ -37,7 +37,13 @@ pub fn detect_target(is_x11: bool) -> TargetKind {
     if spawned.is_err() {
         return TargetKind::Unknown;
     }
-    rx.recv_timeout(DETECT_CAP).unwrap_or(TargetKind::Unknown)
+    rx.recv_timeout(DETECT_CAP).unwrap_or_else(|_| {
+        log::info!(
+            "target detection gave no answer within {} ms",
+            DETECT_CAP.as_millis()
+        );
+        TargetKind::Unknown
+    })
 }
 
 /// Terminals (or a forced choice) take Ctrl+Shift+V, everything else Ctrl+V.
