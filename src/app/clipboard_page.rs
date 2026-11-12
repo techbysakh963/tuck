@@ -131,7 +131,7 @@ impl ClipboardPage {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
 
-        let clear = gtk::Button::with_label("Clear all");
+        let clear = gtk::Button::with_label("Clear history");
         clear.add_css_class("flat");
         clear.set_action_name(Some("app.clear"));
         let hint = gtk::Label::new(Some("Enter to paste"));

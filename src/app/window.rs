@@ -70,7 +70,7 @@ fn menu() -> gio::Menu {
     let main = gio::Menu::new();
     main.append(Some("Preferences"), Some("app.preferences"));
     main.append(Some("Pause recording"), Some("app.pause"));
-    main.append(Some("Clear all"), Some("app.clear"));
+    main.append(Some("Clear history"), Some("app.clear"));
     main.append(Some("About Tuck"), Some("app.about"));
     menu.append_section(None, &main);
     let quit = gio::Menu::new();

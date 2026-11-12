@@ -564,16 +564,7 @@ fn install_actions(ctx: &Rc<AppCtx>) {
 
     let clear = gio::SimpleAction::new("clear", None);
     let c = ctx.clone();
-    clear.connect_activate(move |_, _| {
-        c.wipe_generation.set(c.wipe_generation.get() + 1);
-        {
-            let mut store = c.store.borrow_mut();
-            store.clear_unpinned();
-            store.discard_corrupt_backups();
-        }
-        schedule_save(&c);
-        c.window.clipboard.refresh(false);
-    });
+    clear.connect_activate(move |_, _| confirm_clear(&c));
     app.add_action(&clear);
 
     let about = gio::SimpleAction::new("about", None);
@@ -595,6 +586,35 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let a = app.clone();
     quit.connect_activate(move |_, _| a.quit());
     app.add_action(&quit);
+}
+
+/// Clearing cannot be undone, so it asks first; pinned items stay.
+fn confirm_clear(ctx: &Rc<AppCtx>) {
+    let dialog = adw::AlertDialog::builder()
+        .heading("Clear history?")
+        .body("All items are removed except the ones you pinned. This cannot be undone.")
+        .build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("clear", "Clear history")]);
+    dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let c = ctx.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "clear" {
+            return;
+        }
+        // An image still being prepared must not reappear after this.
+        c.wipe_generation.set(c.wipe_generation.get() + 1);
+        {
+            let mut store = c.store.borrow_mut();
+            store.clear_unpinned();
+            store.discard_corrupt_backups();
+        }
+        schedule_save(&c);
+        c.window.clipboard.refresh(false);
+    });
+    ctx.window.present();
+    dialog.present(Some(&ctx.window.window));
 }
 
 async fn toggle_popup(ctx: &Rc<AppCtx>) {
