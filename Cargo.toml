@@ -48,6 +48,7 @@ opt-level = 3
 opt-level = 3
 
 [package.metadata.deb]
+revision = "2"
 maintainer = "techbysakh963 <240957230+techbysakh963@users.noreply.github.com>"
 section = "utils"
 priority = "optional"
