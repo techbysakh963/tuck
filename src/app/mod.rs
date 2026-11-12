@@ -28,7 +28,9 @@ use crate::capture::{self, CaptureEvent, CaptureStatus};
 use crate::echo::EchoGuard;
 use crate::history::HistoryStore;
 use crate::history::{prepare_image, PreparedImage};
-use crate::ingest::{precheck, store_event, IngestResult};
+use crate::ingest::{
+    into_single_file, png_file_bytes, precheck, store_event, store_files, IngestResult,
+};
 use crate::paste::{Combo, KeySender, UinputKeyboard, XTestSender};
 use crate::privacy::PrivacyFilter;
 use crate::settings::Settings;
@@ -362,39 +364,62 @@ fn on_capture(ctx: &Rc<AppCtx>, event: CaptureEvent) {
     match event.captured {
         // Decoding, scaling and writing an image can take long enough to stall the UI.
         Captured::Image { png } => {
-            let job = ImageJob {
-                png,
-                source: event.source,
-                now,
-                seq,
-                generation: ctx.wipe_generation.get(),
-            };
-            let first = ctx.image_jobs.borrow_mut().submit(job);
-            if let Some(job) = first {
-                let ctx = ctx.clone();
-                glib::spawn_future_local(async move { run_image_jobs(&ctx, job).await });
-            }
+            submit_image(ctx, ImagePayload::Png(png), event.source, now, seq);
         }
-        captured => {
-            let event = CaptureEvent { captured, ..event };
-            let result = store_event(event, &mut ctx.store.borrow_mut(), now);
-            match result {
-                Ok(IngestResult::Stored(outcome)) => {
-                    ctx.clipboard_holder.set(Some(outcome.id()));
-                    stored(ctx);
-                }
-                Ok(IngestResult::Skipped(reason)) => {
-                    log::debug!("capture skipped: {reason:?}")
-                }
-                Err(e) => log::warn!("capture failed: {e}"),
-            }
-        }
+        // One copied file may be a PNG to show as an image; finding out reads
+        // it from disk, which can be slow or stall.
+        captured => match into_single_file(captured) {
+            Ok(path) => submit_image(ctx, ImagePayload::File(path), event.source, now, seq),
+            Err(captured) => store_now(ctx, CaptureEvent { captured, ..event }, now),
+        },
     }
+}
+
+fn submit_image(
+    ctx: &Rc<AppCtx>,
+    payload: ImagePayload,
+    source: Option<String>,
+    now: i64,
+    seq: u64,
+) {
+    let job = ImageJob {
+        payload,
+        source,
+        now,
+        seq,
+        generation: ctx.wipe_generation.get(),
+    };
+    let first = ctx.image_jobs.borrow_mut().submit(job);
+    if let Some(job) = first {
+        let ctx = ctx.clone();
+        glib::spawn_future_local(async move { run_image_jobs(&ctx, job).await });
+    }
+}
+
+fn store_now(ctx: &Rc<AppCtx>, event: CaptureEvent, now: i64) {
+    let result = store_event(event, &mut ctx.store.borrow_mut(), now);
+    match result {
+        Ok(IngestResult::Stored(outcome)) => {
+            ctx.clipboard_holder.set(Some(outcome.id()));
+            stored(ctx);
+        }
+        Ok(IngestResult::Skipped(reason)) => {
+            log::debug!("capture skipped: {reason:?}")
+        }
+        Err(e) => log::warn!("capture failed: {e}"),
+    }
+}
+
+/// What a copy that may become an image entry brought.
+enum ImagePayload {
+    Png(Vec<u8>),
+    /// A single copied file, stored as an image when it is a PNG.
+    File(PathBuf),
 }
 
 /// A copied image waiting for, or going through, preparation.
 struct ImageJob {
-    png: Vec<u8>,
+    payload: ImagePayload,
     source: Option<String>,
     now: i64,
     seq: u64,
@@ -456,12 +481,33 @@ async fn process_image_job(ctx: &Rc<AppCtx>, job: ImageJob) {
         return;
     }
     let ImageJob {
-        png,
+        payload,
         source,
         now,
         seq,
         generation,
     } = job;
+    let (png, file) = match payload {
+        ImagePayload::Png(png) => (png, None),
+        ImagePayload::File(path) => {
+            let inspected = path.clone();
+            let read = gio::spawn_blocking(move || png_file_bytes(&inspected))
+                .await
+                .ok()
+                .flatten();
+            let paused = ctx.settings.borrow().paused;
+            if !keep_prepared_image(generation, ctx.wipe_generation.get(), paused) {
+                return;
+            }
+            match read {
+                Some(png) => (png, Some(path)),
+                None => {
+                    add_file(ctx, &path, source, now, seq);
+                    return;
+                }
+            }
+        }
+    };
     // Already in the history: nothing to decode or write.
     let name = blob_name(&png, "png");
     let known = ctx.store.borrow_mut().touch_image(&name, now);
@@ -491,8 +537,35 @@ async fn process_image_job(ctx: &Rc<AppCtx>, job: ImageJob) {
                 discard_prepared(ctx, &prepared);
             }
         }
+        // A file that only looked like a PNG is still worth keeping as a file.
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData && file.is_some() => {
+            let paused = ctx.settings.borrow().paused;
+            if let Some(path) =
+                file.filter(|_| keep_prepared_image(generation, ctx.wipe_generation.get(), paused))
+            {
+                add_file(ctx, &path, source, now, seq);
+            }
+        }
         Ok(Err(e)) => log::warn!("capture failed: {e}"),
         Err(_) => log::error!("image worker panicked"),
+    }
+}
+
+fn add_file(ctx: &Rc<AppCtx>, path: &std::path::Path, source: Option<String>, now: i64, seq: u64) {
+    let result = store_files(
+        &[path.to_path_buf()],
+        source,
+        &mut ctx.store.borrow_mut(),
+        now,
+    );
+    match result {
+        Ok(outcome) => {
+            if ctx.capture_seq.get() == seq {
+                ctx.clipboard_holder.set(Some(outcome.id()));
+            }
+            stored(ctx);
+        }
+        Err(e) => log::warn!("capture failed: {e}"),
     }
 }
 

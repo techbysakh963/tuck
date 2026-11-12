@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::capture::{CaptureEvent, Captured};
 use crate::echo::{fingerprint, EchoGuard};
@@ -90,16 +90,37 @@ pub fn store_event(
                     Err(e) => return Err(e),
                 }
             }
-            let uris: Vec<String> = paths.iter().map(|p| file_uri(p)).collect();
-            // A huge list would bloat the index; keep it as text, which spills to a blob.
-            if uris.iter().map(String::len).sum::<usize>() <= INLINE_TEXT_MAX {
-                store.add_files(uris, ev.source, now_ms)
-            } else {
-                store.add_text(uris.join("\n"), None, ev.source, now_ms)?
-            }
+            store_files(&paths, ev.source, store, now_ms)?
         }
     };
     Ok(IngestResult::Stored(outcome))
+}
+
+/// Adds copied files as a file list, without looking at their contents.
+pub fn store_files(
+    paths: &[PathBuf],
+    source: Option<String>,
+    store: &mut HistoryStore,
+    now_ms: i64,
+) -> io::Result<AddOutcome> {
+    let uris: Vec<String> = paths.iter().map(|p| file_uri(p)).collect();
+    // A huge list would bloat the index; keep it as text, which spills to a blob.
+    if uris.iter().map(String::len).sum::<usize>() <= INLINE_TEXT_MAX {
+        Ok(store.add_files(uris, source, now_ms))
+    } else {
+        store.add_text(uris.join("\n"), None, source, now_ms)
+    }
+}
+
+/// The path of a copy of exactly one file, whose contents decide whether it
+/// is stored as an image; anything else is handed back.
+pub fn into_single_file(captured: Captured) -> Result<PathBuf, Captured> {
+    match captured {
+        Captured::Files(paths) if paths.len() == 1 => {
+            Ok(paths.into_iter().next().unwrap_or_default())
+        }
+        other => Err(other),
+    }
 }
 
 fn is_empty(c: &Captured) -> bool {
@@ -113,6 +134,12 @@ fn is_empty(c: &Captured) -> bool {
 /// The file's bytes when the copy is exactly one existing PNG file.
 fn single_png_file(paths: &[PathBuf]) -> Option<Vec<u8>> {
     let [path] = paths else { return None };
+    png_file_bytes(path)
+}
+
+/// The file's bytes when it is an existing PNG within the size limit. Reads
+/// the disk, so keep it off the UI thread.
+pub fn png_file_bytes(path: &Path) -> Option<Vec<u8>> {
     let meta = fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_IMAGE_FILE_BYTES {
         return None;
@@ -258,6 +285,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn only_a_single_file_copy_is_inspected() {
+        let one = Captured::Files(vec![PathBuf::from("/tmp/a.png")]);
+        assert_eq!(into_single_file(one), Ok(PathBuf::from("/tmp/a.png")));
+        let two = Captured::Files(vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(into_single_file(two.clone()), Err(two));
+        let text = Captured::Text {
+            text: "x".into(),
+            html: None,
+        };
+        assert_eq!(into_single_file(text.clone()), Err(text));
+    }
+
+    #[test]
+    fn png_bytes_only_for_png_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        image::RgbImage::new(2, 2).save(&png).unwrap();
+        assert!(png_file_bytes(&png).is_some());
+        let txt = dir.path().join("notes.png");
+        fs::write(&txt, "not an image").unwrap();
+        assert!(png_file_bytes(&txt).is_none());
+        assert!(png_file_bytes(dir.path()).is_none());
+    }
+
+    #[test]
+    fn png_file_can_be_stored_as_a_plain_file() {
+        let mut f = fixture(&[]);
+        let path = PathBuf::from("/home/u/shot.png");
+        let out = store_files(&[path], None, &mut f.store, 1).unwrap();
+        assert_eq!(
+            f.store.file_uris(out.id()).unwrap(),
+            ["file:///home/u/shot.png"]
+        );
     }
 
     #[test]
