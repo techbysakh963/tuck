@@ -8,6 +8,14 @@ const PASSWORD_HINT_MIME: &str = "x-kde-passwordManagerHint";
 /// Keeps user patterns from compiling into something that stalls the capture path.
 const PATTERN_SIZE_LIMIT: usize = 256 * 1024;
 
+/// The one way an exclusion pattern is compiled, so what Preferences accepts
+/// is exactly what the filter applies.
+pub fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .size_limit(PATTERN_SIZE_LIMIT)
+        .build()
+}
+
 pub struct PrivacyFilter {
     patterns: Vec<Regex>,
 }
@@ -17,15 +25,13 @@ impl PrivacyFilter {
     pub fn new(patterns: &[String]) -> Self {
         let patterns = patterns
             .iter()
-            .filter_map(
-                |p| match RegexBuilder::new(p).size_limit(PATTERN_SIZE_LIMIT).build() {
-                    Ok(re) => Some(re),
-                    Err(e) => {
-                        log::warn!("ignoring invalid exclusion pattern {p:?}: {e}");
-                        None
-                    }
-                },
-            )
+            .filter_map(|p| match compile(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    log::warn!("ignoring invalid exclusion pattern {p:?}: {e}");
+                    None
+                }
+            })
             .collect();
         Self { patterns }
     }
@@ -73,6 +79,15 @@ mod tests {
         let f = PrivacyFilter::new(&["^sk-[A-Za-z0-9]{20,}$".to_string()]);
         assert!(f.matches_text("sk-abcdefghijklmnopqrstuvwx"));
         assert!(!f.matches_text("Please skip this sentence"));
+    }
+
+    #[test]
+    fn oversized_pattern_is_rejected_for_both_preferences_and_filter() {
+        let huge = "(a{1000}){1000}".to_string();
+        assert!(compile(&huge).is_err());
+        let f = PrivacyFilter::new(&[huge, "ok".to_string()]);
+        assert!(f.matches_text("ok"));
+        assert!(!f.matches_text(&"a".repeat(2000)));
     }
 
     #[test]

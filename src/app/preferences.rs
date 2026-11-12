@@ -6,9 +6,8 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use regex::Regex;
 
-use crate::privacy::PrivacyFilter;
+use crate::privacy::{compile, PrivacyFilter};
 use crate::settings::ShortcutChoice;
 use crate::shortcut;
 
@@ -121,8 +120,9 @@ fn privacy_group(ctx: &Rc<AppCtx>) -> adw::PreferencesGroup {
         if text.is_empty() {
             return;
         }
-        if Regex::new(&text).is_err() {
-            c.window.add_toast("That is not a valid regular expression");
+        if compile(&text).is_err() {
+            c.window
+                .add_toast("That is not a valid regular expression, or it is too large");
             entry.add_css_class("error");
             return;
         }
