@@ -6,7 +6,15 @@ mod data_control;
 mod x11;
 
 /// Largest single clipboard payload a watcher will read (bytes).
-pub(crate) const MAX_PAYLOAD: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
+
+/// Logged when a payload is dropped for its size; never includes the content.
+pub(crate) fn log_oversized() {
+    log::warn!(
+        "clipboard content larger than {} MiB skipped",
+        MAX_PAYLOAD >> 20
+    );
+}
 
 /// Hint some password managers attach to their copies.
 const SECRET_HINT_MIME: &str = "x-kde-passwordManagerHint";

@@ -14,7 +14,7 @@ use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHand
 use wayland_protocols::ext::data_control::v1::client as ext_proto;
 use wayland_protocols_wlr::data_control::v1::client as wlr_proto;
 
-use super::{read_capture, CaptureEvent, MAX_PAYLOAD};
+use super::{log_oversized, read_capture, CaptureEvent, MAX_PAYLOAD};
 
 /// Time one source may stay silent while we read its data.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -82,6 +82,7 @@ fn read_pipe(
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
                 if out.len() > MAX_PAYLOAD {
+                    log_oversized();
                     return None;
                 }
             }

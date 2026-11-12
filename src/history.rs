@@ -16,6 +16,10 @@ use crate::model::{ClipContent, ClipItem, ItemId, TextBody};
 pub const INLINE_TEXT_MAX: usize = 64 * 1024;
 pub const PREVIEW_CHARS: usize = 200;
 pub const THUMB_MAX_H: u32 = 128;
+/// Rich-text flavours above this size are dropped; the plain text is kept.
+pub const HTML_INLINE_MAX: usize = 256 * 1024;
+/// Default total size of all blob files before the oldest unpinned items are evicted.
+pub const DEFAULT_MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
 const INDEX_FILE: &str = "history.json";
 
@@ -92,6 +96,7 @@ pub struct HistoryStore {
     items: Vec<ClipItem>,
     next_id: ItemId,
     max_items: usize,
+    max_blob_bytes: u64,
     dirty: bool,
     read_only: bool,
     #[cfg(test)]
@@ -168,6 +173,7 @@ impl HistoryStore {
             items: index.items,
             next_id,
             max_items: max_items.max(1),
+            max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             dirty: false,
             read_only: report.newer_version.is_some(),
             #[cfg(test)]
@@ -186,6 +192,8 @@ impl HistoryStore {
         source: Option<String>,
         now_ms: i64,
     ) -> io::Result<AddOutcome> {
+        // Held in memory and rewritten on every save, so only small HTML stays inline.
+        let html = html.filter(|h| h.len() <= HTML_INLINE_MAX);
         let body = if text.len() > INLINE_TEXT_MAX {
             let name = self.blobs.put(text.as_bytes(), "txt")?;
             TextBody::Blob {
@@ -336,6 +344,27 @@ impl HistoryStore {
         }
     }
 
+    pub fn set_max_blob_bytes(&mut self, bytes: u64) {
+        self.max_blob_bytes = bytes;
+        self.enforce_cap();
+    }
+
+    /// Total size of the blob files the items refer to.
+    pub fn blob_bytes(&self) -> u64 {
+        self.items.iter().map(|i| self.blob_size(i)).sum()
+    }
+
+    fn blob_size(&self, item: &ClipItem) -> u64 {
+        match &item.content {
+            ClipContent::Text {
+                text: TextBody::Blob { name, .. },
+                ..
+            } => self.blobs.size_of(name),
+            ClipContent::Image { blob, .. } => self.blobs.size_of(blob),
+            _ => 0,
+        }
+    }
+
     pub fn set_max_items(&mut self, n: usize) {
         self.max_items = n.max(1);
         self.enforce_cap();
@@ -416,7 +445,8 @@ impl HistoryStore {
             .sort_by_key(|i| std::cmp::Reverse((i.pinned, i.used_ms, i.id)));
     }
 
-    /// Evicts the oldest unpinned items; pinned items never count against eviction.
+    /// Evicts the oldest unpinned items until both the item count and the blob
+    /// budget are met; pinned items are never evicted.
     fn enforce_cap(&mut self) {
         while self.items.len() > self.max_items {
             match self.items.iter().rposition(|i| !i.pinned) {
@@ -426,6 +456,15 @@ impl HistoryStore {
                 }
                 None => break,
             }
+        }
+        let mut total = self.blob_bytes();
+        while total > self.max_blob_bytes {
+            let Some(pos) = self.items.iter().rposition(|i| !i.pinned) else {
+                break;
+            };
+            total -= self.blob_size(&self.items[pos]);
+            self.items.remove(pos);
+            self.dirty = true;
         }
     }
 }
@@ -762,5 +801,64 @@ mod tests {
             .unwrap();
         assert!(err.to_string().contains("hunter2"), "premise: serde quotes");
         assert!(!describe(&err).contains("hunter2"));
+    }
+
+    #[test]
+    fn blob_budget_evicts_oldest_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let big = |c: &str| c.repeat(INLINE_TEXT_MAX + 1000);
+        s.set_max_blob_bytes(3 * (INLINE_TEXT_MAX as u64 + 1000));
+        let a = add(&mut s, &big("a"), 1).id();
+        add(&mut s, &big("b"), 2);
+        add(&mut s, &big("c"), 3);
+        s.set_pinned(a, true);
+        add(&mut s, &big("d"), 4);
+        // "b" is the oldest unpinned; the pinned "a" stays despite being oldest.
+        let kept: Vec<_> = s.items().iter().map(|i| i.id).collect();
+        assert_eq!(kept.len(), 3);
+        assert!(kept.contains(&a));
+        assert!(s.blob_bytes() <= 3 * (INLINE_TEXT_MAX as u64 + 1000));
+        s.save().unwrap();
+        assert_eq!(fs::read_dir(tmp.path().join("blobs")).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn blob_budget_never_evicts_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let id = add(&mut s, &"p".repeat(INLINE_TEXT_MAX + 1), 1).id();
+        s.set_pinned(id, true);
+        s.set_max_blob_bytes(10);
+        assert!(s.get(id).is_some());
+        let other = add(&mut s, &"q".repeat(INLINE_TEXT_MAX + 1), 2).id();
+        assert!(
+            s.get(other).is_none(),
+            "unpinned item over budget is dropped"
+        );
+    }
+
+    #[test]
+    fn large_html_is_dropped_and_small_html_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let big_html = "<p>x</p>".repeat(HTML_INLINE_MAX / 8 + 10);
+        let a = s
+            .add_text("big".into(), Some(big_html), None, 1)
+            .unwrap()
+            .id();
+        let b = s
+            .add_text("small".into(), Some("<b>s</b>".into()), None, 2)
+            .unwrap()
+            .id();
+        let html = |id| match &s.get(id).unwrap().content {
+            ClipContent::Text { html, .. } => html.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(html(a), None);
+        assert_eq!(html(b).as_deref(), Some("<b>s</b>"));
+        s.save().unwrap();
+        let size = fs::metadata(tmp.path().join("history.json")).unwrap().len();
+        assert!(size < 4 * 1024, "history.json is {size} bytes");
     }
 }

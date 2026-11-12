@@ -13,7 +13,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME};
 
-use super::{read_capture, CaptureEvent, MAX_PAYLOAD};
+use super::{log_oversized, read_capture, CaptureEvent, MAX_PAYLOAD};
 
 /// How long one owner may take to answer a conversion before we give up.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -220,6 +220,7 @@ impl Watcher<'_> {
                         return Some(data);
                     }
                     if data.len() + chunk.len() > MAX_PAYLOAD {
+                        log_oversized();
                         // Drain the rest so the owner is not left blocked.
                         self.abort_incr();
                         return None;
@@ -268,6 +269,7 @@ impl Watcher<'_> {
             offset += (reply.value.len() / 4) as u32;
             out.extend_from_slice(&reply.value);
             if out.len() > MAX_PAYLOAD {
+                log_oversized();
                 return None;
             }
             if reply.bytes_after == 0 {

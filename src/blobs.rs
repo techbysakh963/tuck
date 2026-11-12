@@ -55,6 +55,13 @@ impl BlobStore {
         Ok(name)
     }
 
+    /// Size of a stored blob in bytes; 0 when it is missing.
+    pub fn size_of(&self, name: &str) -> u64 {
+        self.safe_path(name)
+            .and_then(fs::metadata)
+            .map_or(0, |m| m.len())
+    }
+
     pub fn get(&self, name: &str) -> io::Result<Vec<u8>> {
         fs::read(self.safe_path(name)?)
     }
