@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::imageops::FilterType;
-use image::ImageFormat;
+use image::{ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::{blob_name, BlobStore};
@@ -16,6 +16,14 @@ use crate::model::{ClipContent, ClipItem, ItemId, TextBody};
 pub const INLINE_TEXT_MAX: usize = 64 * 1024;
 pub const PREVIEW_CHARS: usize = 200;
 pub const THUMB_MAX_H: u32 = 128;
+/// Wider images are scaled too, so a panorama strip does not become a huge thumbnail.
+pub const THUMB_MAX_W: u32 = 512;
+/// Upper bound on the encoded thumbnail kept in the index.
+pub const THUMB_MAX_BYTES: usize = 48 * 1024;
+/// Largest side of an image that is decoded at all.
+pub const IMAGE_MAX_SIDE: u32 = 16384;
+/// Largest memory the PNG decoder may allocate.
+pub const IMAGE_MAX_ALLOC: u64 = 256 * 1024 * 1024;
 /// Rich-text flavours above this size are dropped; the plain text is kept.
 pub const HTML_INLINE_MAX: usize = 256 * 1024;
 /// Default total size of all blob files before the oldest unpinned items are evicted.
@@ -248,26 +256,40 @@ impl HistoryStore {
             self.changed();
             return Ok(AddOutcome::Moved(id));
         }
-        let img = image::load_from_memory_with_format(png, ImageFormat::Png)
-            .map_err(|e| invalid(format!("not a readable PNG: {e}")))?;
-        let (width, height) = (img.width(), img.height());
-        let thumb_png = if height > THUMB_MAX_H {
-            let w = ((u64::from(width) * u64::from(THUMB_MAX_H)) / u64::from(height)).max(1);
-            let thumb = img.resize_exact(w as u32, THUMB_MAX_H, FilterType::Triangle);
-            encode_png(&thumb)?
-        } else {
-            png.to_vec()
-        };
-        drop(img);
-        let blob = self.blobs.put(png, "png")?;
+        let prepared = prepare_image(png, &self.blobs)?;
+        Ok(self.add_prepared_image(prepared, source, now_ms))
+    }
+
+    /// Where image blobs are written, for preparing an image on another thread.
+    pub fn blob_store(&self) -> BlobStore {
+        self.blobs.clone()
+    }
+
+    /// Adds an image whose blob and thumbnail `prepare_image` already produced.
+    pub fn add_prepared_image(
+        &mut self,
+        prepared: PreparedImage,
+        source: Option<String>,
+        now_ms: i64,
+    ) -> AddOutcome {
+        let existing = self.items.iter().position(|i| match &i.content {
+            ClipContent::Image { blob, .. } => blob == &prepared.blob,
+            ClipContent::Text { .. } => false,
+        });
+        if let Some(pos) = existing {
+            let id = self.items[pos].id;
+            self.items[pos].used_ms = self.items[pos].used_ms.max(now_ms);
+            self.changed();
+            return AddOutcome::Moved(id);
+        }
         let id = self.new_id();
         self.items.push(ClipItem {
             id,
             content: ClipContent::Image {
-                blob,
-                width,
-                height,
-                thumb_png,
+                blob: prepared.blob,
+                width: prepared.width,
+                height: prepared.height,
+                thumb_png: prepared.thumb_png,
             },
             created_ms: now_ms,
             used_ms: now_ms,
@@ -275,7 +297,7 @@ impl HistoryStore {
             source,
         });
         self.changed();
-        Ok(AddOutcome::Added(id))
+        AddOutcome::Added(id)
     }
 
     /// Pinned items first, then most recently used first.
@@ -466,6 +488,62 @@ impl HistoryStore {
             self.items.remove(pos);
             self.dirty = true;
         }
+    }
+}
+
+/// An image decoded, thumbnailed and written to the blob store; ready to be added.
+pub struct PreparedImage {
+    pub blob: String,
+    pub width: u32,
+    pub height: u32,
+    pub thumb_png: Vec<u8>,
+}
+
+/// Decodes `png` under explicit size limits, builds its thumbnail and stores the
+/// original. Safe to run on any thread. Untrusted input: a limit or decode error
+/// means nothing is stored.
+pub fn prepare_image(png: &[u8], blobs: &BlobStore) -> io::Result<PreparedImage> {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(IMAGE_MAX_SIDE);
+    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
+    let mut reader = ImageReader::with_format(Cursor::new(png), ImageFormat::Png);
+    reader.limits(limits);
+    let img = reader
+        .decode()
+        .map_err(|e| invalid(format!("not a readable PNG within limits: {e}")))?;
+    let (width, height) = (img.width(), img.height());
+    let thumb_png = make_thumbnail(&img, png)?;
+    drop(img);
+    let blob = blobs.put(png, "png")?;
+    Ok(PreparedImage {
+        blob,
+        width,
+        height,
+        thumb_png,
+    })
+}
+
+/// Fits the image in `THUMB_MAX_W` x `THUMB_MAX_H` and keeps the encoded size under
+/// `THUMB_MAX_BYTES`, shrinking further when needed.
+fn make_thumbnail(img: &image::DynamicImage, original: &[u8]) -> io::Result<Vec<u8>> {
+    let (w, h) = (img.width(), img.height());
+    if w <= THUMB_MAX_W && h <= THUMB_MAX_H && original.len() <= THUMB_MAX_BYTES {
+        return Ok(original.to_vec());
+    }
+    let scale = (f64::from(THUMB_MAX_W) / f64::from(w))
+        .min(f64::from(THUMB_MAX_H) / f64::from(h))
+        .min(1.0);
+    let mut tw = ((f64::from(w) * scale).round() as u32).max(1);
+    let mut th = ((f64::from(h) * scale).round() as u32).max(1);
+    loop {
+        let thumb = img.resize_exact(tw, th, FilterType::Triangle);
+        let encoded = encode_png(&thumb)?;
+        if encoded.len() <= THUMB_MAX_BYTES || (tw <= 8 && th <= 8) {
+            return Ok(encoded);
+        }
+        tw = (tw / 2).max(1);
+        th = (th / 2).max(1);
     }
 }
 
@@ -860,5 +938,79 @@ mod tests {
         s.save().unwrap();
         let size = fs::metadata(tmp.path().join("history.json")).unwrap().len();
         assert!(size < 4 * 1024, "history.json is {size} bytes");
+    }
+
+    #[test]
+    fn very_wide_image_gets_a_small_thumbnail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = HistoryStore::open(tmp.path(), 50);
+        let png = big_png(16000, 100);
+        let id = s.add_image(&png, None, 1).unwrap().id();
+        match &s.get(id).unwrap().content {
+            ClipContent::Image {
+                width,
+                height,
+                thumb_png,
+                ..
+            } => {
+                assert_eq!((*width, *height), (16000, 100));
+                assert!(
+                    thumb_png.len() <= THUMB_MAX_BYTES,
+                    "{} bytes",
+                    thumb_png.len()
+                );
+                let thumb = image::load_from_memory(thumb_png).unwrap();
+                assert!(thumb.width() <= THUMB_MAX_W && thumb.height() <= THUMB_MAX_H);
+            }
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thumbnail_byte_size_is_capped_for_noisy_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(&tmp.path().join("b")).unwrap();
+        let mut state = 12345u32;
+        let img = image::RgbImage::from_fn(512, 128, |_, _| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            image::Rgb([(state >> 8) as u8, (state >> 16) as u8, (state >> 24) as u8])
+        });
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Png).unwrap();
+        let p = prepare_image(&out.into_inner(), &blobs).unwrap();
+        assert!(p.thumb_png.len() <= THUMB_MAX_BYTES);
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn oversized_declared_dimensions_are_rejected_cheaply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(&tmp.path().join("b")).unwrap();
+        let mut png = big_png(8, 8);
+        // IHDR data starts at byte 16: width, height. Declare 40000 x 40000.
+        png[16..20].copy_from_slice(&40000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&40000u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert!(png.len() < 1024);
+        let started = std::time::Instant::now();
+        let err = prepare_image(&png, &blobs).err().expect("must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(fs::read_dir(tmp.path().join("b")).unwrap().count(), 0);
     }
 }
