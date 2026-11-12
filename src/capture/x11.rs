@@ -18,8 +18,14 @@ use super::{log_oversized, read_capture, CaptureEvent, MAX_PAYLOAD};
 /// How long one owner may take to answer a conversion before we give up.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Longest a whole INCR transfer may take, however steadily chunks arrive.
+const INCR_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Property used as the destination of conversions.
 const DEST_PROPERTY: &[u8] = b"TUCK_SELECTION";
+
+/// How many destination properties are used in turn after abandoned transfers.
+const DEST_PROPERTIES: u8 = 4;
 
 /// Watches the CLIPBOARD selection until the connection fails or `tx` closes.
 pub(super) fn run(tx: &Sender<CaptureEvent>, ready: &dyn Fn()) -> Result<(), String> {
@@ -64,6 +70,7 @@ pub(super) fn run(tx: &Sender<CaptureEvent>, ready: &dyn Fn()) -> Result<(), Str
         atoms,
         fd,
         dirty: false,
+        prop_index: 0,
     };
     loop {
         // Blocks in the kernel until the server sends something: no polling.
@@ -121,6 +128,8 @@ struct Watcher<'a> {
     atoms: Atoms,
     fd: RawFd,
     dirty: bool,
+    /// Which of the destination properties is in use; see `abandon_transfer`.
+    prop_index: u8,
 }
 
 impl Watcher<'_> {
@@ -217,32 +226,52 @@ impl Watcher<'_> {
 
         // INCR: the owner sends chunks; an empty chunk ends the transfer.
         data.clear();
+        let complete_by = Instant::now() + INCR_TIMEOUT;
         loop {
-            let event = self.next_event(Instant::now() + TRANSFER_TIMEOUT)?;
+            let Some(event) = self.next_event(incr_wait_deadline(Instant::now(), complete_by))
+            else {
+                self.abandon_transfer();
+                return None;
+            };
             match event {
                 Event::PropertyNotify(p)
                     if p.window == self.win
                         && p.atom == self.atoms.prop
                         && p.state == x11rb::protocol::xproto::Property::NEW_VALUE =>
                 {
-                    let (_, chunk) = self.take_property()?;
+                    let Some((_, chunk)) = self.take_property() else {
+                        self.abandon_transfer();
+                        return None;
+                    };
                     if chunk.is_empty() {
                         return Some(data);
                     }
                     if data.len() + chunk.len() > MAX_PAYLOAD {
                         log_oversized();
                         // Drain the rest so the owner is not left blocked.
-                        self.abort_incr();
+                        if !self.abort_incr() {
+                            self.abandon_transfer();
+                        }
                         return None;
                     }
                     data.extend_from_slice(&chunk);
                 }
-                other => self.note(&other),
+                other => {
+                    self.note(&other);
+                    // The content is from an owner that no longer holds the
+                    // selection; the run loop reads the new one.
+                    if self.dirty {
+                        self.abandon_transfer();
+                        return None;
+                    }
+                }
             }
         }
     }
 
-    fn abort_incr(&mut self) {
+    /// Reads and discards the rest of an INCR transfer; false when the owner
+    /// did not finish it in time.
+    fn abort_incr(&mut self) -> bool {
         let deadline = Instant::now() + TRANSFER_TIMEOUT;
         while let Some(event) = self.next_event(deadline) {
             if let Event::PropertyNotify(p) = event {
@@ -251,10 +280,29 @@ impl Watcher<'_> {
                 {
                     match self.take_property() {
                         Some((_, chunk)) if !chunk.is_empty() => {}
-                        _ => return,
+                        Some(_) => return true,
+                        None => return false,
                     }
                 }
             }
+        }
+        false
+    }
+
+    /// Moves later conversions to another destination property. An owner left
+    /// in the middle of an INCR transfer writes its next chunk as soon as its
+    /// property is deleted, which the next request would do; with a different
+    /// property that chunk cannot be taken for the new answer.
+    fn abandon_transfer(&mut self) {
+        let index = (self.prop_index + 1) % DEST_PROPERTIES;
+        let atom = self
+            .conn
+            .intern_atom(false, &dest_property_name(index))
+            .ok()
+            .and_then(|c| c.reply().ok());
+        if let Some(reply) = atom {
+            self.prop_index = index;
+            self.atoms.prop = reply.atom;
         }
     }
 
@@ -379,6 +427,22 @@ fn is_answer_to(
     e.requestor == win && e.selection == selection && e.target == target
 }
 
+/// The destination property for slot `index`; slot 0 is the plain name.
+fn dest_property_name(index: u8) -> Vec<u8> {
+    if index == 0 {
+        DEST_PROPERTY.to_vec()
+    } else {
+        format!("{}_{index}", String::from_utf8_lossy(DEST_PROPERTY)).into_bytes()
+    }
+}
+
+/// When to stop waiting for the next INCR chunk: each chunk gets the usual
+/// timeout, but never past the end of the whole transfer, so a source that
+/// trickles data cannot hold the watcher.
+fn incr_wait_deadline(now: Instant, complete_by: Instant) -> Instant {
+    (now + TRANSFER_TIMEOUT).min(complete_by)
+}
+
 /// A capture is only kept when the selection owner stayed the same while it
 /// was read.
 fn unless_owner_changed<T>(event: Option<T>, owner_changed: bool) -> Option<T> {
@@ -389,6 +453,32 @@ fn unless_owner_changed<T>(event: Option<T>, owner_changed: bool) -> Option<T> {
 mod tests {
     use super::*;
     use x11rb::protocol::xproto::SelectionNotifyEvent;
+
+    #[test]
+    fn incr_transfer_has_an_overall_deadline() {
+        let start = Instant::now();
+        let complete_by = start + INCR_TIMEOUT;
+        assert_eq!(
+            incr_wait_deadline(start, complete_by),
+            start + TRANSFER_TIMEOUT
+        );
+        // Late in the transfer the overall deadline wins over a fresh wait.
+        let late = complete_by - Duration::from_secs(1);
+        assert_eq!(incr_wait_deadline(late, complete_by), complete_by);
+        assert_eq!(
+            incr_wait_deadline(complete_by + INCR_TIMEOUT, complete_by),
+            complete_by
+        );
+    }
+
+    #[test]
+    fn destination_properties_are_distinct() {
+        assert_eq!(dest_property_name(0), DEST_PROPERTY);
+        let names: std::collections::HashSet<_> =
+            (0..DEST_PROPERTIES).map(dest_property_name).collect();
+        assert_eq!(names.len(), usize::from(DEST_PROPERTIES));
+        assert_eq!(dest_property_name(2), b"TUCK_SELECTION_2");
+    }
 
     #[test]
     fn capture_read_across_an_owner_change_is_dropped() {
