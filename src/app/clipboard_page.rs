@@ -16,14 +16,14 @@ use super::{now_ms, schedule_save, AppCtx};
 const MAX_RECENT_ROWS: usize = 200;
 
 /// Items matching `query`: every whitespace-separated term must occur,
-/// case-insensitively, in the preview text. Images match the term "image".
+/// case-insensitively, in the start of the text (its first `PREVIEW_CHARS` characters). Images match the term "image".
 pub fn filter_items<'a>(items: &'a [ClipItem], query: &str) -> Vec<&'a ClipItem> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     items
         .iter()
         .filter(|item| {
             let haystack = match &item.content {
-                ClipContent::Text { text, .. } => text.preview().to_lowercase(),
+                ClipContent::Text { text, .. } => text.head().to_lowercase(),
                 ClipContent::Image { .. } => "image".to_string(),
             };
             terms.iter().all(|t| haystack.contains(t.as_str()))

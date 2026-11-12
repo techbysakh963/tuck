@@ -25,6 +25,16 @@ impl TextBody {
             TextBody::Blob { preview, .. } => preview,
         }
     }
+
+    /// The first `PREVIEW_CHARS` characters of the preview: all a row title or
+    /// search needs, however long the stored text is.
+    pub fn head(&self) -> &str {
+        let text = self.preview();
+        match text.char_indices().nth(crate::history::PREVIEW_CHARS) {
+            Some((end, _)) => &text[..end],
+            None => text,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,5 +76,19 @@ mod png_bytes {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(d)?;
         STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::PREVIEW_CHARS;
+
+    #[test]
+    fn head_cuts_at_a_character_boundary() {
+        let long = TextBody::Inline("é".repeat(PREVIEW_CHARS + 50));
+        assert_eq!(long.head().chars().count(), PREVIEW_CHARS);
+        let short = TextBody::Inline("abc".into());
+        assert_eq!(short.head(), "abc");
     }
 }

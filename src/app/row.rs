@@ -16,7 +16,7 @@ const LEADING_SIZE: i32 = 40;
 /// The single line shown as a row title.
 pub fn item_title(item: &ClipItem) -> String {
     match &item.content {
-        ClipContent::Text { text, .. } => one_line(text.preview()),
+        ClipContent::Text { text, .. } => one_line(text.head()),
         ClipContent::Image { width, height, .. } => format!("Image, {width} × {height}"),
     }
 }
