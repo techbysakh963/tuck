@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=io.github.techbysakh963.Tuck
+Exec=/usr/bin/tuck --gapplication-service

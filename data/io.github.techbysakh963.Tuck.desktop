@@ -9,9 +9,10 @@ Terminal=false
 Categories=Utility;GTK;
 Keywords=clipboard;history;paste;emoji;
 StartupNotify=true
+DBusActivatable=true
 X-GNOME-UsesNotifications=false
-Actions=Preferences;
+Actions=preferences;
 
-[Desktop Action Preferences]
+[Desktop Action preferences]
 Name=Preferences
 Exec=tuck --preferences

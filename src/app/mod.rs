@@ -841,6 +841,9 @@ fn parse_args(args: &[std::ffi::OsString]) -> Request {
             "--preferences" => Request::Preferences,
             "--help" | "-h" => Request::Help,
             "--version" | "-V" => Request::Version,
+            // Options GApplication handles itself, e.g. the `--gapplication-service`
+            // that D-Bus activation starts the app with.
+            other if other.starts_with("--gapplication-") => Request::Background,
             other => Request::Unknown(other.to_string()),
         },
     }
@@ -995,6 +998,10 @@ mod tests {
         assert_eq!(parse_args(&args(&["tuck", "-h"])), Request::Help);
         assert_eq!(parse_args(&args(&["tuck", "--help"])), Request::Help);
         assert_eq!(parse_args(&args(&["tuck", "--version"])), Request::Version);
+        assert_eq!(
+            parse_args(&args(&["tuck", "--gapplication-service"])),
+            Request::Background
+        );
         assert_eq!(
             parse_args(&args(&["tuck", "--bogus"])),
             Request::Unknown("--bogus".into())

@@ -67,6 +67,7 @@ maintainer-scripts = "packaging/"
 assets = [
     ["target/release/tuck", "usr/bin/tuck", "755"],
     ["data/io.github.techbysakh963.Tuck.desktop", "usr/share/applications/", "644"],
+    ["data/io.github.techbysakh963.Tuck.service", "usr/share/dbus-1/services/", "644"],
     ["data/io.github.techbysakh963.Tuck.metainfo.xml", "usr/share/metainfo/", "644"],
     ["data/icons/io.github.techbysakh963.Tuck.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["data/icons/io.github.techbysakh963.Tuck-symbolic.svg", "usr/share/icons/hicolor/symbolic/apps/", "644"],
@@ -79,6 +80,7 @@ assets = [
 assets = [
     { source = "target/release/tuck", dest = "/usr/bin/tuck", mode = "755" },
     { source = "data/io.github.techbysakh963.Tuck.desktop", dest = "/usr/share/applications/io.github.techbysakh963.Tuck.desktop", mode = "644" },
+    { source = "data/io.github.techbysakh963.Tuck.service", dest = "/usr/share/dbus-1/services/io.github.techbysakh963.Tuck.service", mode = "644" },
     { source = "data/io.github.techbysakh963.Tuck.metainfo.xml", dest = "/usr/share/metainfo/io.github.techbysakh963.Tuck.metainfo.xml", mode = "644" },
     { source = "data/icons/io.github.techbysakh963.Tuck.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.techbysakh963.Tuck.svg", mode = "644" },
     { source = "data/icons/io.github.techbysakh963.Tuck-symbolic.svg", dest = "/usr/share/icons/hicolor/symbolic/apps/io.github.techbysakh963.Tuck-symbolic.svg", mode = "644" },
