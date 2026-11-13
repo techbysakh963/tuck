@@ -8,3 +8,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The tag of this action is the Rust version; the workflows pin them on
+      # purpose (including the oldest supported one), so never bump it.
+      - dependency-name: dtolnay/rust-toolchain
