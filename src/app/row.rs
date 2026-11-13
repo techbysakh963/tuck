@@ -14,6 +14,43 @@ use super::clipboard_page::relative_time;
 /// Size of the colour swatch and image thumbnail in a row.
 const LEADING_SIZE: i32 = 40;
 
+/// The pin and remove buttons of a row.
+pub struct RowButtons {
+    pub pin: gtk::Button,
+    pub remove: gtk::Button,
+}
+
+fn icon_button(icon: &str, label: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.add_css_class("flat");
+    button.add_css_class("circular");
+    button.set_valign(gtk::Align::Center);
+    button.set_tooltip_text(Some(label));
+    // Focus stays in the search box; keyboard users have Ctrl+P and Delete.
+    button.set_can_focus(false);
+    button.set_focus_on_click(false);
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    button
+}
+
+/// Adds the pin and remove buttons. The caller decides when they show (see
+/// `button_visibility`); a pinned item keeps its pin visible.
+pub fn add_actions(row: &adw::ActionRow, pinned: bool) -> RowButtons {
+    let pin = icon_button("view-pin-symbolic", if pinned { "Unpin" } else { "Pin" });
+    let remove = icon_button("edit-delete-symbolic", "Remove");
+    row.add_suffix(&pin);
+    row.add_suffix(&remove);
+    pin.set_visible(pinned);
+    remove.set_visible(false);
+    RowButtons { pin, remove }
+}
+
+/// (pin visible, remove visible) for a row, given whether it is pinned and
+/// whether the pointer or the keyboard is on it.
+pub fn button_visibility(pinned: bool, active: bool) -> (bool, bool) {
+    (pinned || active, active)
+}
+
 /// The single line shown as a row title.
 pub fn item_title(item: &ClipItem) -> String {
     match &item.content {
@@ -71,12 +108,6 @@ pub fn build_row(item: &ClipItem, now_ms: i64) -> adw::ActionRow {
         }
     }
 
-    if item.pinned {
-        let pin = gtk::Image::from_icon_name("view-pin-symbolic");
-        pin.add_css_class("dim-label");
-        pin.update_property(&[gtk::accessible::Property::Label("Pinned")]);
-        row.add_suffix(&pin);
-    }
     row
 }
 
@@ -131,4 +162,17 @@ fn thumbnail(png: &[u8]) -> Option<gtk::Picture> {
     picture.set_valign(gtk::Align::Center);
     picture.update_property(&[gtk::accessible::Property::Label("Image preview")]);
     Some(picture)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buttons_show_on_the_active_row_and_a_pinned_item_keeps_its_pin() {
+        assert_eq!(button_visibility(false, false), (false, false));
+        assert_eq!(button_visibility(false, true), (true, true));
+        assert_eq!(button_visibility(true, false), (true, false));
+        assert_eq!(button_visibility(true, true), (true, true));
+    }
 }

@@ -64,6 +64,8 @@ struct Entry {
     id: ItemId,
     section: Section,
     row: gtk::ListBoxRow,
+    pinned: bool,
+    buttons: super::row::RowButtons,
 }
 
 #[derive(Default)]
@@ -71,6 +73,7 @@ struct State {
     query: String,
     entries: Vec<Entry>,
     selected: Option<ItemId>,
+    hovered: Option<ItemId>,
     signature: Option<Vec<(ItemId, bool)>>,
 }
 
@@ -86,6 +89,7 @@ pub struct ClipboardPage {
     banner: adw::Banner,
     state: RefCell<State>,
     ctx: RefCell<Weak<AppCtx>>,
+    me: RefCell<Weak<ClipboardPage>>,
 }
 
 fn heading(text: &str) -> gtk::Label {
@@ -169,12 +173,14 @@ impl ClipboardPage {
             banner,
             state: RefCell::new(State::default()),
             ctx: RefCell::new(Weak::new()),
+            me: RefCell::new(Weak::new()),
         })
     }
 
     /// Connects the page to the application state; call once.
     pub fn attach(self: &Rc<Self>, ctx: &Rc<AppCtx>) {
         *self.ctx.borrow_mut() = Rc::downgrade(ctx);
+        *self.me.borrow_mut() = Rc::downgrade(self);
 
         for (list, other) in [
             (&self.pinned_list, &self.recent_list),
@@ -277,11 +283,15 @@ impl ClipboardPage {
         ] {
             for item in items {
                 let row = super::row::build_row(item, now);
+                let buttons = super::row::add_actions(&row, item.pinned);
+                self.wire_row(&row, &buttons, item.id);
                 list.append(&row);
                 entries.push(Entry {
                     id: item.id,
                     section,
                     row: row.upcast(),
+                    pinned: item.pinned,
+                    buttons,
                 });
             }
         }
@@ -310,6 +320,8 @@ impl ClipboardPage {
             st.entries = entries;
             st.signature = Some(signature);
             st.selected = select;
+            // The rows were rebuilt, so no pointer is on any of them yet.
+            st.hovered = None;
         }
         self.apply_selection(select, false);
         if force {
@@ -352,6 +364,65 @@ impl ClipboardPage {
                 }
             }
         }
+        self.update_reveal();
+    }
+
+    /// Shows the buttons of the row under the pointer or on the keyboard
+    /// selection, and hides the others.
+    fn update_reveal(&self) {
+        let st = self.state.borrow();
+        for e in &st.entries {
+            let active = st.selected == Some(e.id) || st.hovered == Some(e.id);
+            let (pin, remove) = super::row::button_visibility(e.pinned, active);
+            e.buttons.pin.set_visible(pin);
+            e.buttons.remove.set_visible(remove);
+        }
+    }
+
+    fn set_hover(&self, id: Option<ItemId>) {
+        self.state.borrow_mut().hovered = id;
+        self.update_reveal();
+    }
+
+    /// Connects a row's pointer tracking and its buttons.
+    fn wire_row(&self, row: &adw::ActionRow, buttons: &super::row::RowButtons, id: ItemId) {
+        let motion = gtk::EventControllerMotion::new();
+        let page = self.me.borrow().clone();
+        motion.connect_enter(move |_, _, _| {
+            if let Some(page) = page.upgrade() {
+                page.set_hover(Some(id));
+            }
+        });
+        let page = self.me.borrow().clone();
+        motion.connect_leave(move |_| {
+            if let Some(page) = page.upgrade() {
+                if page.state.borrow().hovered == Some(id) {
+                    page.set_hover(None);
+                }
+            }
+        });
+        row.add_controller(motion);
+
+        // The list is rebuilt by these actions, so run them after the click
+        // finished instead of destroying the button that was just pressed.
+        let page = self.me.borrow().clone();
+        buttons.pin.connect_clicked(move |_| {
+            let page = page.clone();
+            gtk::glib::idle_add_local_once(move || {
+                if let Some(page) = page.upgrade() {
+                    page.toggle_pin(id);
+                }
+            });
+        });
+        let page = self.me.borrow().clone();
+        buttons.remove.connect_clicked(move |_| {
+            let page = page.clone();
+            gtk::glib::idle_add_local_once(move || {
+                if let Some(page) = page.upgrade() {
+                    page.delete(id);
+                }
+            });
+        });
     }
 
     fn scroll_to(&self, row: &gtk::ListBoxRow) {
@@ -395,9 +466,21 @@ impl ClipboardPage {
     }
 
     pub fn toggle_pin_selected(&self) {
-        let (Some(ctx), Some(id)) = (self.ctx(), self.state.borrow().selected) else {
-            return;
-        };
+        let selected = self.state.borrow().selected;
+        if let Some(id) = selected {
+            self.toggle_pin(id);
+        }
+    }
+
+    pub fn delete_selected(&self) {
+        let selected = self.state.borrow().selected;
+        if let Some(id) = selected {
+            self.delete(id);
+        }
+    }
+
+    fn toggle_pin(&self, id: ItemId) {
+        let Some(ctx) = self.ctx() else { return };
         {
             let mut store = ctx.store.borrow_mut();
             let pinned = store.get(id).is_some_and(|i| i.pinned);
@@ -407,20 +490,22 @@ impl ClipboardPage {
         self.refresh(false);
     }
 
-    pub fn delete_selected(&self) {
-        let (Some(ctx), Some(id)) = (self.ctx(), self.state.borrow().selected) else {
-            return;
-        };
-        // Land on the neighbour after the removed row.
+    fn delete(&self, id: ItemId) {
+        let Some(ctx) = self.ctx() else { return };
+        // When the selected row goes, land on its neighbour.
         let neighbour = {
             let st = self.state.borrow();
-            let idx = st.entries.iter().position(|e| e.id == id);
-            idx.and_then(|i| {
-                st.entries
-                    .get(i + 1)
-                    .or_else(|| i.checked_sub(1).and_then(|p| st.entries.get(p)))
-            })
-            .map(|e| e.id)
+            if st.selected != Some(id) {
+                st.selected
+            } else {
+                let idx = st.entries.iter().position(|e| e.id == id);
+                idx.and_then(|i| {
+                    st.entries
+                        .get(i + 1)
+                        .or_else(|| i.checked_sub(1).and_then(|p| st.entries.get(p)))
+                })
+                .map(|e| e.id)
+            }
         };
         ctx.store.borrow_mut().remove(id);
         schedule_save(&ctx);
