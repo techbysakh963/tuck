@@ -41,3 +41,9 @@ First release.
 - The clipboard watcher reconnects on its own after losing the connection and
   tells you while it is down.
 - The top-bar icon appears when the tray host starts after Tuck.
+- Launching Tuck from the app grid opens the popup, also when Tuck is not
+  running yet (the package now installs a D-Bus service file).
+- The popup stays open while its menu or one of its dialogs is showing, and
+  closes only when you really switch to another application.
+- Emoji that the installed fonts cannot draw are left out of the grid instead of
+  showing as empty boxes.
