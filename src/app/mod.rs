@@ -619,6 +619,7 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let preferences = gio::SimpleAction::new("preferences", None);
     let c = ctx.clone();
     preferences.connect_activate(move |_, _| {
+        log::info!("menu action: preferences");
         c.window.present();
         preferences::present(&c);
     });
@@ -628,6 +629,7 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let pause = gio::SimpleAction::new_stateful("pause", None, &paused.to_variant());
     let c = ctx.clone();
     pause.connect_activate(move |action, _| {
+        log::info!("menu action: pause");
         let now_paused = !action
             .state()
             .and_then(|s| s.get::<bool>())
@@ -666,6 +668,8 @@ fn install_actions(ctx: &Rc<AppCtx>) {
     let about = gio::SimpleAction::new("about", None);
     let c = ctx.clone();
     about.connect_activate(move |_, _| {
+        log::info!("menu action: about");
+        log::info!("menu action: clear");
         let dialog = adw::AboutDialog::builder()
             .application_name("Tuck")
             .application_icon(APP_ID)
@@ -680,7 +684,10 @@ fn install_actions(ctx: &Rc<AppCtx>) {
 
     let quit = gio::SimpleAction::new("quit", None);
     let a = app.clone();
-    quit.connect_activate(move |_, _| a.quit());
+    quit.connect_activate(move |_, _| {
+        log::info!("menu action: quit");
+        a.quit();
+    });
     app.add_action(&quit);
 }
 

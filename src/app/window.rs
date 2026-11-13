@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The popup window: tabs, search, menu and the page stack.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -68,17 +68,17 @@ fn popup_keys_apply(dialog_open: bool, menu_open: bool) -> bool {
     !dialog_open && !menu_open
 }
 
-/// Losing focus closes the popup, except while one of its own dialogs or its
-/// menu is in front: on Wayland the menu is a separate surface and takes the
-/// keyboard focus, which must not count as the user leaving.
-fn hide_on_focus_loss(active: bool, visible: bool, dialog_open: bool, menu_open: bool) -> bool {
-    !active && visible && !dialog_open && !menu_open
-}
-
-/// Focus moves between the window, its menu and its dialogs in quick steps that
-/// pass through "not active". Only focus that stays lost this long (the user
-/// went to another application) closes the popup.
+/// The compositor's focus state can flicker while a menu or dialog opens or
+/// closes. Only a loss that lasts this long (the user went to another
+/// application) closes the popup.
 const FOCUS_LOSS_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Every way of hiding the popup goes through here so that the menu is never
+/// left open behind a hidden window.
+fn hide_popup(window: &adw::ApplicationWindow, menu_button: &gtk::MenuButton) {
+    menu_button.popdown();
+    window.set_visible(false);
+}
 
 fn tab_title(page: &str) -> &'static str {
     match page {
@@ -235,8 +235,9 @@ impl PopupWindow {
             .build();
 
         // The window lives for the whole session: closing only hides it.
-        window.connect_close_request(|w| {
-            w.set_visible(false);
+        let close_menu = menu_button.clone();
+        window.connect_close_request(move |w| {
+            hide_popup(w, &close_menu);
             glib::Propagation::Stop
         });
 
@@ -276,45 +277,63 @@ impl PopupWindow {
         self.emoji.attach(ctx);
         self.symbols.attach(ctx);
 
-        let check_focus = {
-            let window = self.window.clone();
-            let menu_button = self.menu_button.clone();
-            let generation = Rc::new(Cell::new(0u32));
-            Rc::new(move || {
-                // A newer focus change supersedes the pending check.
-                let this = generation.get().wrapping_add(1);
-                generation.set(this);
-                let (window, menu_button, generation) =
-                    (window.clone(), menu_button.clone(), generation.clone());
+        // Dismissal follows the compositor's focus state of the toplevel, not
+        // the keyboard focus: on Wayland a menu of ours is its own surface and
+        // takes the keyboard, while the toplevel stays focused as far as the
+        // compositor is concerned.
+        let generation = Rc::new(Cell::new(0u64));
+        {
+            let generation = generation.clone();
+            // A pending check must never survive a hide and a later show.
+            self.window
+                .connect_unmap(move |_| generation.set(generation.get().wrapping_add(1)));
+        }
+        let tracked: Rc<RefCell<Option<(gtk::gdk::Toplevel, glib::SignalHandlerId)>>> =
+            Rc::default();
+        let (window, menu_button) = (self.window.clone(), self.menu_button.clone());
+        self.window.connect_map(move |w| {
+            if let Some((old, id)) = tracked.borrow_mut().take() {
+                old.disconnect(id);
+            }
+            let Some(top) = w
+                .surface()
+                .and_then(|s| s.dynamic_cast::<gtk::gdk::Toplevel>().ok())
+            else {
+                return;
+            };
+            let focused = Cell::new(top.state().contains(gtk::gdk::ToplevelState::FOCUSED));
+            let (generation, window, menu_button) =
+                (generation.clone(), window.clone(), menu_button.clone());
+            let id = top.connect_state_notify(move |top| {
+                let now = top.state().contains(gtk::gdk::ToplevelState::FOCUSED);
+                if focused.replace(now) == now {
+                    return;
+                }
+                log::info!("popup focus: {}", if now { "gained" } else { "lost" });
+                let ticket = generation.get().wrapping_add(1);
+                generation.set(ticket);
+                if now {
+                    return;
+                }
+                let (generation, window, menu_button, top) = (
+                    generation.clone(),
+                    window.clone(),
+                    menu_button.clone(),
+                    top.downgrade(),
+                );
                 glib::timeout_add_local_once(FOCUS_LOSS_GRACE, move || {
-                    let menu_open = menu_button.popover().is_some_and(|p| p.is_visible());
-                    if generation.get() == this
-                        && hide_on_focus_loss(
-                            window.is_active(),
-                            window.is_visible(),
-                            window.visible_dialog().is_some(),
-                            menu_open,
-                        )
+                    let Some(top) = top.upgrade() else { return };
+                    if generation.get() == ticket
+                        && window.is_mapped()
+                        && !top.state().contains(gtk::gdk::ToplevelState::FOCUSED)
                     {
                         log::info!("popup hidden: focus left the window");
-                        menu_button.popdown();
-                        window.set_visible(false);
+                        hide_popup(&window, &menu_button);
                     }
                 });
-            })
-        };
-        {
-            let check = check_focus.clone();
-            self.window.connect_is_active_notify(move |w| {
-                if !w.is_active() {
-                    check();
-                }
             });
-        }
-        if let Some(popover) = self.menu_button.popover() {
-            let check = check_focus.clone();
-            popover.connect_closed(move |_| check());
-        }
+            *tracked.borrow_mut() = Some((top, id));
+        });
 
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -355,7 +374,7 @@ impl PopupWindow {
             return true;
         }
         if key == Key::Escape {
-            self.window.set_visible(false);
+            self.hide();
             return true;
         }
         if !self.on_clipboard_page() {
@@ -414,12 +433,13 @@ impl PopupWindow {
         // A menu left open by an earlier hide would swallow the next click.
         self.menu_button.popdown();
         self.window.present();
-        self.search.grab_focus();
+        if self.window.visible_dialog().is_none() {
+            self.search.grab_focus();
+        }
     }
 
     pub fn hide(&self) {
-        self.menu_button.popdown();
-        self.window.set_visible(false);
+        hide_popup(&self.window, &self.menu_button);
     }
 
     pub fn is_visible(&self) -> bool {
@@ -434,15 +454,6 @@ impl PopupWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn focus_loss_hides_only_when_nothing_of_ours_is_in_front() {
-        assert!(hide_on_focus_loss(false, true, false, false));
-        assert!(!hide_on_focus_loss(true, true, false, false));
-        assert!(!hide_on_focus_loss(false, false, false, false));
-        assert!(!hide_on_focus_loss(false, true, true, false));
-        assert!(!hide_on_focus_loss(false, true, false, true));
-    }
 
     #[test]
     fn tab_shortcuts() {
