@@ -3,6 +3,14 @@ all-features = true
 
 [advisories]
 version = 2
+# zbus 5 is only pulled in by ksni (the top-bar icon). These are notices that
+# the crates were merged into zbus 6, not vulnerabilities. Drop the entries
+# once ksni moves to zbus 6.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; only reached through ksni" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; only reached through ksni" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; only reached through ksni" },
+]
 
 [licenses]
 version = 2
