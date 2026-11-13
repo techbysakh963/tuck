@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Pin and remove buttons on each history row, shown under the pointer and on the
+  keyboard selection. Pinned items always show their pin.
+
 ## [0.1.0] - 2026-11-13
 
 First release.

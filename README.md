@@ -125,8 +125,9 @@ Copy things as you normally do, then press your shortcut and pick one.
 | Ctrl+Tab, Alt+1 to Alt+3 | Switch between Clipboard, Emoji and Symbols |
 | Esc | Close the popup |
 
-Just start typing to search. The menu (the three dots) has Preferences, Pause
-recording, Clear history, About and Quit.
+Just start typing to search. Point at an item to get its **pin** and **remove**
+buttons; a pinned item always shows its pin. The menu (the three dots) has
+Preferences, Pause recording, Clear history, About and Quit.
 
 The top-bar icon needs the AppIndicator extension. Ubuntu enables it by
 default; on other GNOME systems install `gnome-shell-extension-appindicator`.
