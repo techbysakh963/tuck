@@ -11,16 +11,23 @@ the app you were using, terminals included.
 
 - Clipboard history for text, rich text and images, with search and pinned items.
 - Emoji and symbol pickers in the same popup. Inserting one never lands in your
-  history, and what you had copied before is put back afterwards.
+  history. Afterwards the previous clipboard item is put back, but only when it
+  is a recorded history item that is still present; content that was never
+  recorded (password-manager copies, excluded or paused copies, anything copied
+  before Tuck started) is not restored.
 - Pastes straight into the window you were working in, on Wayland and X11.
-- Skips copies from password managers and anything matching your own patterns.
+- Skips copies that carry the sensitive-content hint
+  (`x-kde-passwordManagerHint`) set by supporting password managers, and
+  anything matching your own patterns. Applications that do not set the hint
+  cannot be detected.
 - Light on resources: no polling while idle and no web view.
 
 ## Requirements
 
 - GNOME 46 or newer (Ubuntu 24.04 or newer), Wayland or X11.
 - GTK 4.14 or newer and libadwaita 1.5 or newer.
-- Backends for KDE and wlroots-based compositors exist, but they are untested.
+- GNOME on Wayland is the tested setup. Backends for KDE and wlroots-based
+  compositors exist, but they are untested.
 
 ## Install
 
@@ -44,6 +51,11 @@ Then:
 
     cargo build --release
     cargo run
+
+A plain build or `cargo run` does not install the uinput udev rule or the
+desktop entry, and does not put `tuck` on your `PATH`. Pasting on Wayland needs
+the udev rule, so install the package (or install those files by hand from
+`data/`).
 
 ## First run
 
@@ -72,14 +84,19 @@ by default; on other GNOME systems install `gnome-shell-extension-appindicator`.
 
 ## Privacy
 
-- Copies that a password manager marks as sensitive are not recorded.
+- Copies that carry the sensitive-content hint (`x-kde-passwordManagerHint`)
+  set by supporting password managers are not recorded. Applications that do
+  not set the hint cannot be detected, so their copies are recorded like any
+  other.
 - In Preferences you can add exclusion patterns (regular expressions); a copy
   matching one is skipped.
 - Recording can be paused from Preferences.
 - History lives under `~/.local/share/tuck`, settings under `~/.config/tuck`.
   Directories are mode 0700 and files 0600. The log at
   `~/.local/share/tuck/logs/tuck.log` does not contain clipboard content.
-- To wipe it, use "Clear history" in the popup, or delete `~/.local/share/tuck`.
+- "Clear history" in the popup removes everything except pinned items. To
+  remove everything, quit Tuck first (it saves the history again when it
+  exits), then delete `~/.local/share/tuck`.
 
 ## Troubleshooting
 
@@ -107,15 +124,24 @@ and reload with:
   Ctrl+V; use Shift+Enter instead.
 - On Wayland the compositor decides where the popup appears.
 - The interface is English only.
+- The paste shortcut is typed for the keyboard layout that is first in your
+  list. With several layouts, the key can be wrong while another layout is
+  active. That stays so until Tuck can require GTK 4.18 or newer.
 
 ## Uninstall
 
-Before removing the package, open Preferences > Keyboard and choose **Reset
-shortcut**. Removing the package does not touch your GNOME settings, so a custom
-shortcut would otherwise stay behind. Then remove Tuck with your package manager
-and, to delete your data:
+Removing the package does not touch your GNOME settings or your home
+directory, so do this in order:
 
-    rm -r ~/.local/share/tuck ~/.config/tuck
+1. Open Preferences > Keyboard and choose **Reset shortcut**, so a custom
+   shortcut does not stay behind.
+2. Switch off **Start at login** in Preferences (or delete
+   `~/.config/autostart/io.github.techbysakh963.Tuck.desktop`).
+3. Quit Tuck from the popup menu.
+4. Remove the package with your package manager.
+5. Optionally delete your data:
+
+       rm -r ~/.local/share/tuck ~/.config/tuck
 
 ## Security note
 
