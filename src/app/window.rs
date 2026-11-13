@@ -14,7 +14,7 @@ use libadwaita::prelude::*;
 use super::clipboard_page::ClipboardPage;
 use super::grid_page::GridPage;
 use super::paste_flow::PasteMode;
-use super::symbols::{emoji_entries, symbol_entries};
+use super::symbols::{drawable_emoji_entries, symbol_entries};
 use super::AppCtx;
 
 const WIDTH: i32 = 380;
@@ -137,7 +137,7 @@ fn menu() -> gio::Menu {
 impl PopupWindow {
     pub fn new(app: &adw::Application) -> Self {
         let clipboard = ClipboardPage::new();
-        let emoji = GridPage::new(emoji_entries, true);
+        let emoji = GridPage::new(drawable_emoji_entries, true);
         let symbols = GridPage::new(|| symbol_entries().to_vec(), false);
         let search = gtk::SearchEntry::new();
 

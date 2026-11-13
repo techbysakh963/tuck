@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+use gtk4::prelude::*;
+
 /// One cell of an emoji or symbol grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridEntry {
@@ -26,6 +28,38 @@ pub fn emoji_entries() -> Vec<GridEntry> {
             keywords: e.shortcodes().map(|s| s.replace('_', " ")).collect(),
         })
         .collect()
+}
+
+/// The emoji the installed fonts can draw. The emoji data follows the latest
+/// Unicode, but many systems ship an older emoji font, and a character it lacks
+/// would show as an empty box. Needs GTK to be initialised.
+pub fn drawable_emoji_entries() -> Vec<GridEntry> {
+    let all = emoji_entries();
+    let context = gtk4::Label::new(None).pango_context();
+    let fontset = context
+        .font_description()
+        .zip(context.language())
+        .and_then(|(desc, language)| context.load_fontset(&desc, &language));
+    let Some(fontset) = fontset else {
+        return all;
+    };
+    let drawable: Vec<GridEntry> = all
+        .iter()
+        .filter(|e| font_can_draw(&fontset, &e.glyph))
+        .cloned()
+        .collect();
+    // With no emoji font at all, showing the boxes beats an empty grid.
+    if drawable.len() * 4 < all.len() {
+        return all;
+    }
+    drawable
+}
+
+fn font_can_draw(fontset: &gtk4::pango::Fontset, glyph: &str) -> bool {
+    glyph
+        .chars()
+        .next()
+        .is_some_and(|c| fontset.font(c as u32).has_char(c))
 }
 
 /// Indices of entries matching `query`: every whitespace-separated term must
