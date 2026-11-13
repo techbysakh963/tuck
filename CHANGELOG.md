@@ -6,10 +6,16 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-13
+
 ### Added
 
 - Pin and remove buttons on each history row, shown under the pointer and on the
   keyboard selection. Pinned items always show their pin.
+- `install.sh` installs the latest release with one command, after checking its
+  checksum, and `uninstall.sh` removes Tuck completely.
+- `tuck --reset` removes Tuck's keyboard shortcut and start-at-login entry and
+  gives GNOME's own shortcut back. The uninstall script runs it.
 
 ## [0.1.0] - 2026-11-13
 

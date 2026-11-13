@@ -66,13 +66,25 @@ polling while idle, no web view, and about 60 MB of memory.
 
 ## Install
 
+### Quick install
+
+One command on Debian or Ubuntu (64-bit x86):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/techbysakh963/tuck/main/install.sh | sh
+```
+
+It downloads the latest release, checks its SHA-256 checksum, and installs it
+with `apt` (it asks for your password). Read [install.sh](install.sh) first if
+you like; it is short.
+
 ### From a package
 
 Download the latest `.deb` (Debian, Ubuntu) from the
 [Releases](https://github.com/techbysakh963/tuck/releases) page and install it:
 
 ```sh
-sudo apt install ./tuck_0.1.0-1_amd64.deb
+sudo apt install ./tuck_0.1.1-1_amd64.deb
 ```
 
 Compare the file with `SHA256SUMS` from the same release if you like:
@@ -193,11 +205,30 @@ by itself as soon as the host is running.
 
 ## Uninstall
 
-Removing the package does not touch your GNOME settings or your home
+### Quick uninstall
+
+One command removes everything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/techbysakh963/tuck/main/uninstall.sh | sh
+```
+
+It stops Tuck, gives GNOME's own shortcut back, turns off start at login,
+removes the package, and **deletes your history and settings**. To keep those,
+add `-s -- --keep-data` after `sh`; to see what it would do without doing it,
+use `-s -- --dry-run`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/techbysakh963/tuck/main/uninstall.sh | sh -s -- --keep-data
+```
+
+### Step by step
+
+Removing the package alone does not touch your GNOME settings or your home
 directory, so do these in order:
 
-1. Open Preferences, then Keyboard, and choose **Reset shortcut** so no custom
-   shortcut is left behind.
+1. Run `tuck --reset`, or open Preferences, then Keyboard, and choose **Reset
+   shortcut**, so no custom shortcut is left behind.
 2. Turn off **Start at login** in Preferences, or delete
    `~/.config/autostart/io.github.techbysakh963.Tuck.desktop`.
 3. Quit Tuck from the popup menu.
