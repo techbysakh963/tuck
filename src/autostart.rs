@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Start at login through an XDG autostart entry.
 
 use std::fs;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The resident application: actions, command line, capture wiring.
 
 pub mod clipboard_page;

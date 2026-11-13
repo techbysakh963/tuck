@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The Clipboard tab: Pinned and Recent lists, search and keyboard handling.
 
 use std::cell::RefCell;

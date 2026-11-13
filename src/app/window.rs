@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The popup window: tabs, search, menu and the page stack.
 
 use std::rc::Rc;

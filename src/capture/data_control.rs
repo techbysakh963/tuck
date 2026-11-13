@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Wayland data-control watchers (ext-data-control-v1 and the wlroots variant).
 
 use std::collections::HashMap;

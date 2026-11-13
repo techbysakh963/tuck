@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Emoji and symbol data for the grid pages, plus the search over it.
 
 use std::sync::OnceLock;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The optional top-bar icon (StatusNotifierItem). It runs on its own thread,
 //! only reacts to D-Bus calls, and hands every click to the main loop as a
 //! command, so nothing here touches the UI.

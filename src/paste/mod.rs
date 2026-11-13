@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Paste keystrokes: the key combination and the senders that deliver it.
 
 pub mod uinput;

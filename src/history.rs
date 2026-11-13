@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The clipboard history index: ordering, de-duplication, pinning, caps and persistence.
 
 use std::collections::HashSet;

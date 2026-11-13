@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Paste keystrokes through the XTEST extension on X11 sessions.
 
 use std::thread::sleep;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! One history entry as a list row.
 
 use gtk4 as gtk;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! User preferences stored in `$XDG_CONFIG_HOME/tuck/settings.json`.
 
 use std::fs;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A virtualised grid of glyphs, shared by the Emoji and Symbols tabs.
 
 use std::cell::{Cell, OnceCell, RefCell};

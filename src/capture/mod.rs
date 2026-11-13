@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Clipboard capture: what a watcher reports to the rest of the app.
 
 use std::cell::Cell;

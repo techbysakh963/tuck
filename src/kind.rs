@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Guesses what kind of thing a piece of copied text is, for row styling.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A small file logger that rotates while the app runs and collapses repeats.
 
 use std::ffi::OsString;

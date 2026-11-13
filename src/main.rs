@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 fn main() -> libadwaita::glib::ExitCode {
     // The popup is a small static list, so the GPU renderer buys nothing, and
     // loading the GL/Vulkan driver stack keeps over 100 MB resident for as long

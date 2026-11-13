@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Data types for clipboard history entries.
 
 use serde::{Deserialize, Serialize};

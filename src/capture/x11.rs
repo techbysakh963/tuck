@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! X11 clipboard watcher driven by XFixes selection events.
 
 use std::os::fd::{AsRawFd, RawFd};

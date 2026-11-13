@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Recognises clipboard changes that Tuck itself caused.
 //!
 //! When Tuck puts an item on the clipboard to paste it, the watcher sees that

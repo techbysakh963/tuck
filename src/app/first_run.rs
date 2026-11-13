@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The one-time offer to bind Super+V, and the shared "apply a shortcut" step.
 
 use std::rc::Rc;

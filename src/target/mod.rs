@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Works out whether the window that will receive a paste is a terminal, which
 //! decides between Ctrl+V and Ctrl+Shift+V.
 

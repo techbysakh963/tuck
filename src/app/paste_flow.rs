@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Putting a history item on the clipboard and typing the paste shortcut.
 
 use gtk4::gdk;

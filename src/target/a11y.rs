@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Terminal detection through the AT-SPI accessibility bus, the only way to
 //! see which widget has focus in another window on GNOME Wayland.
 

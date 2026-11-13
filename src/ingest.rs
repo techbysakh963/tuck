@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Turns capture events into history entries, applying the privacy and echo rules.
 
 use std::fs;

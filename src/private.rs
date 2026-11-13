@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Owner-only file and directory creation for data that may hold copied secrets.
 
 use std::fs::{self, DirBuilder, OpenOptions};

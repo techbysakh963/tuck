@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Copied files: how a list is stored and which flavours are offered on paste.
 
 use std::path::{Path, PathBuf};

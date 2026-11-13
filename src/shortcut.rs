@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Registering Tuck's shortcut with GNOME, and undoing it.
 
 use gtk4::gio;

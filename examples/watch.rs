@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Prints every clipboard change the capture backend reports.
 
 fn main() {

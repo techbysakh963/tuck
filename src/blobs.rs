@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Content-addressed files for data too large to keep in the history index.
 
 use std::collections::HashSet;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Terminal detection on X11 from the active window's WM_CLASS.
 
 use x11rb::connection::Connection;
