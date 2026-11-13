@@ -13,11 +13,12 @@
     </p>
     <p>
       The same popup has emoji and symbol pickers. Inserting one never lands in
-      your history, and whatever you had copied before is put back afterwards.
+      your history, and the item you had copied before is put back afterwards
+      if it is still in the history.
     </p>
     <ul>
       <li>Text, rich text and images, with pinned items and search</li>
-      <li>Skips copies from password managers and anything matching your own patterns</li>
+      <li>Skips copies that password managers mark as sensitive, and anything matching your own patterns</li>
       <li>Built with GTK 4 and libadwaita, no custom styling</li>
     </ul>
   </description>
@@ -47,8 +48,8 @@
     <control>pointing</control>
   </supports>
   <branding>
-    <color type="primary" scheme_preference="light">#d8e4f8</color>
-    <color type="primary" scheme_preference="dark">#2a3a5a</color>
+    <color type="primary" scheme_preference="light">#3584e4</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
   </branding>
   <content_rating type="oars-1.1"/>
   <releases>
