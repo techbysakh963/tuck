@@ -16,9 +16,18 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/clipboard.png" alt="The Clipboard tab" width="31%">
-  <img src="docs/screenshots/emoji.png" alt="The Emoji tab" width="31%">
-  <img src="docs/screenshots/symbols.png" alt="The Symbols tab" width="31%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/clipboard-dark.png">
+    <img src="docs/screenshots/clipboard-light.png" alt="The Clipboard tab with a pinned item and recent copies" width="31%">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/emoji-dark.png">
+    <img src="docs/screenshots/emoji-light.png" alt="The Emoji tab" width="31%">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/symbols-dark.png">
+    <img src="docs/screenshots/symbols-light.png" alt="The Symbols tab" width="31%">
+  </picture>
 </p>
 
 Tuck keeps a searchable history of what you copy and pastes it back with one
