@@ -83,10 +83,12 @@ pub struct Tray {
 }
 
 impl Tray {
-    /// Shows the icon. `None` when no StatusNotifier host is running (a plain
-    /// GNOME session without the AppIndicator extension), which is not an error.
+    /// Shows the icon. Tuck usually starts at login, before the desktop's
+    /// StatusNotifier host (the AppIndicator extension on GNOME) is up, so a
+    /// missing host is not an error: the icon appears once the host does. On a
+    /// desktop without one it simply never shows.
     pub fn show(tx: async_channel::Sender<TrayCommand>, paused: bool) -> Option<Tray> {
-        match (TuckTray { tx, paused }).spawn() {
+        match (TuckTray { tx, paused }).assume_sni_available(true).spawn() {
             Ok(handle) => Some(Tray { handle }),
             Err(e) => {
                 log::info!("no top-bar icon: {e}");
