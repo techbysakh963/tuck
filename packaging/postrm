@@ -1,7 +1,8 @@
 #!/bin/sh
 set -e
+# dpkg passes remove/purge; rpm passes the number of versions left, 0 on final removal.
 case "$1" in
-    remove|purge)
+    remove|purge|0)
         # Without the retrigger the access granted by the rule can outlast the package until reboot.
         udevadm control --reload-rules || true
         udevadm trigger --action=change --subsystem-match=misc --sysname-match=uinput || true
