@@ -67,6 +67,17 @@ fn popup_keys_apply(dialog_open: bool, menu_open: bool) -> bool {
     !dialog_open && !menu_open
 }
 
+/// Losing focus closes the popup, except while one of its own dialogs or its
+/// menu is in front: on Wayland the menu is a separate surface and takes the
+/// keyboard focus, which must not count as the user leaving.
+fn hide_on_focus_loss(active: bool, visible: bool, dialog_open: bool, menu_open: bool) -> bool {
+    !active && visible && !dialog_open && !menu_open
+}
+
+/// After the menu closes the window may stay unfocused (the user clicked another
+/// application), and no further focus change would arrive to close the popup.
+const MENU_CLOSED_RECHECK: std::time::Duration = std::time::Duration::from_millis(250);
+
 fn tab_title(page: &str) -> &'static str {
     match page {
         PAGE_EMOJI => "Emoji",
@@ -263,13 +274,34 @@ impl PopupWindow {
         self.emoji.attach(ctx);
         self.symbols.attach(ctx);
 
-        // Losing focus closes the popup, except while one of our own dialogs
-        // (About, Preferences) has it.
-        self.window.connect_is_active_notify(|w| {
-            if !w.is_active() && w.is_visible() && w.visible_dialog().is_none() {
+        let menu_button = self.menu_button.clone();
+        self.window.connect_is_active_notify(move |w| {
+            let menu_open = menu_button.popover().is_some_and(|p| p.is_visible());
+            if hide_on_focus_loss(
+                w.is_active(),
+                w.is_visible(),
+                w.visible_dialog().is_some(),
+                menu_open,
+            ) {
                 w.set_visible(false);
             }
         });
+        if let Some(popover) = self.menu_button.popover() {
+            let window = self.window.clone();
+            popover.connect_closed(move |_| {
+                let window = window.clone();
+                glib::timeout_add_local_once(MENU_CLOSED_RECHECK, move || {
+                    if hide_on_focus_loss(
+                        window.is_active(),
+                        window.is_visible(),
+                        window.visible_dialog().is_some(),
+                        false,
+                    ) {
+                        window.set_visible(false);
+                    }
+                });
+            });
+        }
 
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -386,6 +418,15 @@ impl PopupWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_loss_hides_only_when_nothing_of_ours_is_in_front() {
+        assert!(hide_on_focus_loss(false, true, false, false));
+        assert!(!hide_on_focus_loss(true, true, false, false));
+        assert!(!hide_on_focus_loss(false, false, false, false));
+        assert!(!hide_on_focus_loss(false, true, true, false));
+        assert!(!hide_on_focus_loss(false, true, false, true));
+    }
 
     #[test]
     fn tab_shortcuts() {
