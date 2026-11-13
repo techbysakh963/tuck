@@ -56,7 +56,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo install cargo-deb --version 3.8.0 --locked
       - run: cargo deb --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb
           path: target/debian/*.deb
@@ -82,7 +82,7 @@ jobs:
       - run: cargo install cargo-generate-rpm --version 0.21.1 --locked
       - run: cargo build --release --locked
       - run: cargo generate-rpm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm
           path: target/generate-rpm/*.rpm
@@ -133,7 +133,7 @@ jobs:
             exit 1
           fi
           cat release/release-notes.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release
           path: release/
