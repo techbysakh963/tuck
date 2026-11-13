@@ -834,6 +834,7 @@ enum Request {
     Toggle,
     Background,
     Preferences,
+    Reset,
     Help,
     Version,
     Unknown(String),
@@ -846,6 +847,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Request {
             "--toggle" => Request::Toggle,
             "--background" => Request::Background,
             "--preferences" => Request::Preferences,
+            "--reset" => Request::Reset,
             "--help" | "-h" => Request::Help,
             "--version" | "-V" => Request::Version,
             // Options GApplication handles itself, e.g. the `--gapplication-service`
@@ -856,7 +858,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Request {
     }
 }
 
-const USAGE: &str = "Usage: tuck [--toggle | --background | --preferences | --version | --help]\n";
+const USAGE: &str = "Usage: tuck [--toggle | --background | --preferences | --reset | --version | --help]\n\n  --reset   remove Tuck's keyboard shortcut and start-at-login entry, restore\n            GNOME's own shortcut, then exit (run it before uninstalling)\n";
 
 static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
 
@@ -909,6 +911,25 @@ fn quit_on_signals(app: &adw::Application) {
     });
 }
 
+/// Undoes what Tuck changed on the desktop: its keyboard shortcut (restoring
+/// GNOME's own), and the start-at-login entry. Leaves history and settings alone.
+fn reset_desktop() -> glib::ExitCode {
+    let path = glib::user_config_dir().join("tuck").join("settings.json");
+    let mut settings = Settings::load(&path);
+    crate::shortcut::reset_gnome(&mut settings);
+    if path.exists() {
+        if let Err(e) = settings.save(&path) {
+            eprintln!("tuck: cannot save settings: {e}");
+        }
+    }
+    if let Err(e) = crate::autostart::set_enabled(false) {
+        eprintln!("tuck: cannot remove the start-at-login entry: {e}");
+        return glib::ExitCode::FAILURE;
+    }
+    println!("tuck: shortcut and start-at-login entry removed");
+    glib::ExitCode::SUCCESS
+}
+
 pub fn run() -> glib::ExitCode {
     // Answered here, in the calling terminal, even when Tuck is already running
     // (the running instance would otherwise print into its own output).
@@ -922,6 +943,7 @@ pub fn run() -> glib::ExitCode {
             println!("tuck {}", env!("CARGO_PKG_VERSION"));
             return glib::ExitCode::SUCCESS;
         }
+        Request::Reset => return reset_desktop(),
         Request::Unknown(arg) => {
             eprint!("tuck: unknown option {arg}\n{USAGE}");
             return glib::ExitCode::from(2);
@@ -962,7 +984,7 @@ pub fn run() -> glib::ExitCode {
             Request::Preferences => app.activate_action("preferences", None),
             Request::Background => {}
             // Rejected in `run` before the application starts.
-            Request::Help | Request::Version | Request::Unknown(_) => {}
+            Request::Help | Request::Version | Request::Reset | Request::Unknown(_) => {}
         }
         glib::ExitCode::SUCCESS
     });
@@ -1005,6 +1027,7 @@ mod tests {
         assert_eq!(parse_args(&args(&["tuck", "-h"])), Request::Help);
         assert_eq!(parse_args(&args(&["tuck", "--help"])), Request::Help);
         assert_eq!(parse_args(&args(&["tuck", "--version"])), Request::Version);
+        assert_eq!(parse_args(&args(&["tuck", "--reset"])), Request::Reset);
         assert_eq!(
             parse_args(&args(&["tuck", "--gapplication-service"])),
             Request::Background
