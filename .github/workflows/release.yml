@@ -18,7 +18,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check the tag matches the package version
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Check the tag, metainfo and changelog match the package version
         run: |
           version=$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           tag="${GITHUB_REF_NAME#v}"
@@ -26,17 +29,14 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
-          grep -q "<release version=\"$version\"" data/io.github.techbysakh963.Tuck.metainfo.xml \
+          grep -qF "<release version=\"$version\"" data/io.github.techbysakh963.Tuck.metainfo.xml \
             || { echo "metainfo has no release entry for $version" >&2; exit 1; }
-          grep -q "^## \[$version\]" CHANGELOG.md \
-            || echo "::warning::CHANGELOG.md has no section for $version"
+          awk -v h="## [$version]" 'index($0, h) == 1 { found = 1 } END { exit !found }' CHANGELOG.md \
+            || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libxkbcommon-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -60,6 +60,7 @@ jobs:
         with:
           name: deb
           path: target/debian/*.deb
+          if-no-files-found: error
 
   rpm:
     needs: verify
@@ -69,7 +70,11 @@ jobs:
     container: fedora:40
     steps:
       - name: Install build dependencies
-        run: dnf install -y gcc git pkgconf-pkg-config gtk4-devel libadwaita-devel libxkbcommon-devel
+        # The toolchain installer downloads with curl and unpacks with tar and
+        # gzip; the base image does not promise any of them.
+        run: >-
+          dnf install -y gcc git pkgconf-pkg-config gtk4-devel libadwaita-devel libxkbcommon-devel
+          curl ca-certificates tar gzip
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -81,37 +86,75 @@ jobs:
         with:
           name: rpm
           path: target/generate-rpm/*.rpm
+          if-no-files-found: error
 
-  publish:
-    # Publishing only makes sense for a real tag.
-    if: startsWith(github.ref, 'refs/tags/v')
+  assemble:
+    # Runs on every trigger so a manual run exercises everything up to the
+    # actual publishing.
     needs: [deb, rpm]
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: packages
           merge-multiple: true
-      - name: Write checksums
-        run: cd dist && sha256sum -- * > SHA256SUMS
+      - name: Collect packages and write checksums
+        run: |
+          set -eu
+          shopt -s nullglob
+          debs=(packages/*.deb)
+          rpms=(packages/*.rpm)
+          all=(packages/*)
+          if [ "${#debs[@]}" -lt 1 ] || [ "${#rpms[@]}" -lt 1 ] \
+            || [ "${#all[@]}" -ne $(( ${#debs[@]} + ${#rpms[@]} )) ]; then
+            echo "expected .deb and .rpm packages only, got:" >&2
+            ls -la packages >&2
+            exit 1
+          fi
+          mkdir release
+          cp -- "${debs[@]}" "${rpms[@]}" release/
+          (cd release && sha256sum -- *.deb *.rpm > SHA256SUMS)
+      - name: Extract release notes
+        run: |
+          set -eu
+          # Read the version from Cargo.toml so this also works when run from a branch.
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          awk -v h="## [$version]" '
+            /^## \[/ { if (found) exit; if (index($0, h) == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > release/release-notes.md
+          if ! grep -q '[^[:space:]]' release/release-notes.md; then
+            echo "CHANGELOG.md has no notes for $version" >&2
+            exit 1
+          fi
+          cat release/release-notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    # Publishing only makes sense for a pushed tag, not a manual run.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [assemble]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          # Notes come from the newest section of CHANGELOG.md, otherwise from
-          # the tag message.
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
-            /^## \[/ { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } }
-            found { print }
-          ' CHANGELOG.md > notes.md
-          if grep -q '[^[:space:]]' notes.md; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
-          fi
+          gh release create "$GITHUB_REF_NAME" release/*.deb release/*.rpm release/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --notes-file release/release-notes.md
