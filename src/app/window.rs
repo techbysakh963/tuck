@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The popup window: tabs, search, menu and the page stack.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -74,9 +75,10 @@ fn hide_on_focus_loss(active: bool, visible: bool, dialog_open: bool, menu_open:
     !active && visible && !dialog_open && !menu_open
 }
 
-/// After the menu closes the window may stay unfocused (the user clicked another
-/// application), and no further focus change would arrive to close the popup.
-const MENU_CLOSED_RECHECK: std::time::Duration = std::time::Duration::from_millis(250);
+/// Focus moves between the window, its menu and its dialogs in quick steps that
+/// pass through "not active". Only focus that stays lost this long (the user
+/// went to another application) closes the popup.
+const FOCUS_LOSS_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn tab_title(page: &str) -> &'static str {
     match page {
@@ -274,33 +276,44 @@ impl PopupWindow {
         self.emoji.attach(ctx);
         self.symbols.attach(ctx);
 
-        let menu_button = self.menu_button.clone();
-        self.window.connect_is_active_notify(move |w| {
-            let menu_open = menu_button.popover().is_some_and(|p| p.is_visible());
-            if hide_on_focus_loss(
-                w.is_active(),
-                w.is_visible(),
-                w.visible_dialog().is_some(),
-                menu_open,
-            ) {
-                w.set_visible(false);
-            }
-        });
-        if let Some(popover) = self.menu_button.popover() {
+        let check_focus = {
             let window = self.window.clone();
-            popover.connect_closed(move |_| {
-                let window = window.clone();
-                glib::timeout_add_local_once(MENU_CLOSED_RECHECK, move || {
-                    if hide_on_focus_loss(
-                        window.is_active(),
-                        window.is_visible(),
-                        window.visible_dialog().is_some(),
-                        false,
-                    ) {
+            let menu_button = self.menu_button.clone();
+            let generation = Rc::new(Cell::new(0u32));
+            Rc::new(move || {
+                // A newer focus change supersedes the pending check.
+                let this = generation.get().wrapping_add(1);
+                generation.set(this);
+                let (window, menu_button, generation) =
+                    (window.clone(), menu_button.clone(), generation.clone());
+                glib::timeout_add_local_once(FOCUS_LOSS_GRACE, move || {
+                    let menu_open = menu_button.popover().is_some_and(|p| p.is_visible());
+                    if generation.get() == this
+                        && hide_on_focus_loss(
+                            window.is_active(),
+                            window.is_visible(),
+                            window.visible_dialog().is_some(),
+                            menu_open,
+                        )
+                    {
+                        log::info!("popup hidden: focus left the window");
+                        menu_button.popdown();
                         window.set_visible(false);
                     }
                 });
+            })
+        };
+        {
+            let check = check_focus.clone();
+            self.window.connect_is_active_notify(move |w| {
+                if !w.is_active() {
+                    check();
+                }
             });
+        }
+        if let Some(popover) = self.menu_button.popover() {
+            let check = check_focus.clone();
+            popover.connect_closed(move |_| check());
         }
 
         let keys = gtk::EventControllerKey::new();
@@ -398,11 +411,14 @@ impl PopupWindow {
     }
 
     pub fn present(&self) {
+        // A menu left open by an earlier hide would swallow the next click.
+        self.menu_button.popdown();
         self.window.present();
         self.search.grab_focus();
     }
 
     pub fn hide(&self) {
+        self.menu_button.popdown();
         self.window.set_visible(false);
     }
 
